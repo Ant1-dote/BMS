@@ -9,7 +9,22 @@ ApplicationWindow {
     height: 920
     visible: true
     title: "控制台"
-    color: "#0e1b2a"
+    color: "#f3f7fb"
+
+    property color cWindowTop: "#f6f9fc"
+    property color cWindowMid: "#edf3f8"
+    property color cWindowBottom: "#e5edf5"
+    property color cPanel: "#f8fbff"
+    property color cPanelBorder: "#c9d8e8"
+    property color cCard: "#ffffff"
+    property color cCardBorder: "#d4e1ef"
+    property color cTitle: "#304861"
+    property color cText: "#17324a"
+    property color cSubtle: "#6f859c"
+    property color cChartBg: "#f9fcff"
+    property color cGrid: "#d8e2ec"
+    property color cStatusBg: "#eaf2fb"
+    property color cStatusBorder: "#c3d5e8"
 
     property var drateOptions: [
         { text: "30000 次/秒 (0xF0)", value: 0xF0 },
@@ -37,18 +52,18 @@ ApplicationWindow {
 
     function levelColor(level) {
         if (level === "ok") {
-            return "#53e3c2"
+            return "#0c8a69"
         }
         if (level === "info") {
-            return "#9ab8d3"
+            return "#5e7387"
         }
         if (level === "tx") {
-            return "#f8c35f"
+            return "#b17600"
         }
         if (level === "error") {
-            return "#ff7f7f"
+            return "#c93838"
         }
-        return "#dbe9f8"
+        return "#304861"
     }
 
     component MetricCard: Rectangle {
@@ -57,8 +72,8 @@ ApplicationWindow {
         required property color accent
 
         radius: 10
-        color: "#102236"
-        border.color: "#2a425f"
+        color: root.cCard
+        border.color: root.cCardBorder
         border.width: 1
         implicitHeight: 92
 
@@ -69,13 +84,13 @@ ApplicationWindow {
 
             Label {
                 text: parent.parent.title
-                color: "#bdd4ec"
+                color: root.cSubtle
                 font.pixelSize: 12
             }
 
             Label {
                 text: parent.parent.value
-                color: "#f3f7ff"
+                color: root.cText
                 font.pixelSize: 20
                 font.bold: true
             }
@@ -107,8 +122,8 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     radius: 12
-                    color: "#274463"
-                    border.color: "#3f7099"
+                    color: "#d8e9fb"
+                    border.color: "#b4cce5"
                     border.width: 1
                     implicitHeight: 88
 
@@ -120,12 +135,12 @@ ApplicationWindow {
                         Label {
                             text: "^_^"
                             font.pixelSize: 24
-                            color: "#f3f7ff"
+                            color: "#24425f"
                             font.bold: true
                         }
                         Label {
                             text: "控制中心"
-                            color: "#dcecff"
+                            color: "#4c6985"
                         }
                     }
                 }
@@ -178,14 +193,14 @@ ApplicationWindow {
                             Layout.columnSpan: 2
                             Layout.fillWidth: true
                             implicitHeight: 34
-                            color: "#1b314a"
+                            color: root.cStatusBg
                             radius: 8
-                            border.color: "#3b5e82"
+                            border.color: root.cStatusBorder
 
                             Label {
                                 anchors.centerIn: parent
                                 text: controller.statusText
-                                color: "#e8f2ff"
+                                color: root.cText
                             }
                         }
                     }
@@ -429,9 +444,9 @@ ApplicationWindow {
 
         Rectangle {
             SplitView.fillWidth: true
-            color: "#0f2438"
+            color: root.cPanel
             radius: 12
-            border.color: "#2a425f"
+            border.color: root.cPanelBorder
             border.width: 1
 
             ColumnLayout {
@@ -475,9 +490,9 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
                     Layout.preferredHeight: 420
-                    color: "#0b1b2d"
+                    color: root.cChartBg
                     radius: 10
-                    border.color: "#2a425f"
+                    border.color: root.cPanelBorder
                     border.width: 1
 
                     ColumnLayout {
@@ -487,7 +502,7 @@ ApplicationWindow {
 
                         Label {
                             text: controller.acqMode === "SCAN8" ? "实时 ADC 曲线（8通道）" : "实时 ADC 曲线"
-                            color: "#f3f7ff"
+                            color: root.cTitle
                             font.pixelSize: 14
                             font.bold: true
                         }
@@ -497,7 +512,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
                             antialiasing: true
-                            backgroundColor: "#0a1320"
+                            backgroundColor: "#ffffff"
                             legend.visible: controller.acqMode === "SCAN8"
                             margins.left: 8
                             margins.right: 8
@@ -508,25 +523,25 @@ ApplicationWindow {
                                 id: axisX
                                 min: controller.axisXMin
                                 max: controller.axisXMax
-                                labelsColor: "#dbeeff"
+                                labelsColor: "#445c74"
                                 titleText: "时间 (s)"
-                                gridLineColor: "#2a3c52"
+                                gridLineColor: root.cGrid
                             }
 
                             ValueAxis {
                                 id: axisY
                                 min: controller.axisYMin
                                 max: controller.axisYMax
-                                labelsColor: "#dbeeff"
+                                labelsColor: "#445c74"
                                 titleText: "电压 (V)"
-                                gridLineColor: "#2a3c52"
+                                gridLineColor: root.cGrid
                             }
 
                             LineSeries {
                                 id: singleShadowSeries
                                 axisX: axisX
                                 axisY: axisY
-                                color: "#6f7d8f"
+                                color: "#bcc6d2"
                                 width: 2.8
                                 visible: controller.acqMode !== "SCAN8"
                                 name: "Raw"
@@ -570,9 +585,9 @@ ApplicationWindow {
                 Rectangle {
                     Layout.fillWidth: true
                     Layout.preferredHeight: 260
-                    color: "#0b1b2d"
+                    color: root.cCard
                     radius: 10
-                    border.color: "#2a425f"
+                    border.color: root.cPanelBorder
                     border.width: 1
 
                     ColumnLayout {
@@ -584,7 +599,7 @@ ApplicationWindow {
                             Layout.fillWidth: true
                             Label {
                                 text: "串口流 + SQL 日志"
-                                color: "#f3f7ff"
+                                color: root.cTitle
                                 font.bold: true
                             }
                             Item { Layout.fillWidth: true }
@@ -631,9 +646,9 @@ ApplicationWindow {
 
     background: Rectangle {
         gradient: Gradient {
-            GradientStop { position: 0.0; color: "#0f1724" }
-            GradientStop { position: 0.45; color: "#10263a" }
-            GradientStop { position: 1.0; color: "#17344b" }
+            GradientStop { position: 0.0; color: root.cWindowTop }
+            GradientStop { position: 0.45; color: root.cWindowMid }
+            GradientStop { position: 1.0; color: root.cWindowBottom }
         }
     }
 }
