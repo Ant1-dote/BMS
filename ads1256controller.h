@@ -1,0 +1,225 @@
+#pragma once
+
+#include "logdatabase.h"
+#include "loglistmodel.h"
+#include "scalarekf.h"
+
+#include <QObject>
+#include <QPointer>
+#include <QRegularExpression>
+#include <QStringList>
+#include <QVector>
+
+#include <utility>
+
+#include <QtSerialPort/qserialport.h>
+#include <QtCharts/QXYSeries>
+
+class ADS1256Controller : public QObject {
+    Q_OBJECT
+
+    Q_PROPERTY(QStringList availablePorts READ availablePorts NOTIFY availablePortsChanged)
+    Q_PROPERTY(bool connected READ connected NOTIFY connectedChanged)
+    Q_PROPERTY(bool acquisitionEnabled READ acquisitionEnabled NOTIFY acquisitionEnabledChanged)
+    Q_PROPERTY(QString statusText READ statusText NOTIFY statusTextChanged)
+
+    Q_PROPERTY(QString latestAdText READ latestAdText NOTIFY metricChanged)
+    Q_PROPERTY(QString latestVoltageText READ latestVoltageText NOTIFY metricChanged)
+    Q_PROPERTY(QString latestHexText READ latestHexText NOTIFY metricChanged)
+    Q_PROPERTY(qlonglong sampleCount READ sampleCount NOTIFY metricChanged)
+
+    Q_PROPERTY(double vref READ vref WRITE setVref NOTIFY configChanged)
+    Q_PROPERTY(int pga READ pga WRITE setPga NOTIFY configChanged)
+    Q_PROPERTY(QString psel READ psel WRITE setPsel NOTIFY configChanged)
+    Q_PROPERTY(QString nsel READ nsel WRITE setNsel NOTIFY configChanged)
+    Q_PROPERTY(int drate READ drate WRITE setDrate NOTIFY configChanged)
+    Q_PROPERTY(QString acqMode READ acqMode WRITE setAcqMode NOTIFY configChanged)
+    Q_PROPERTY(int viewChannel READ viewChannel WRITE setViewChannel NOTIFY configChanged)
+    Q_PROPERTY(QString xAxisMode READ xAxisMode WRITE setXAxisMode NOTIFY configChanged)
+    Q_PROPERTY(double windowSeconds READ windowSeconds WRITE setWindowSeconds NOTIFY configChanged)
+
+    Q_PROPERTY(bool ekfEnabled READ ekfEnabled WRITE setEkfEnabled NOTIFY configChanged)
+    Q_PROPERTY(double ekfQ READ ekfQ WRITE setEkfQ NOTIFY configChanged)
+    Q_PROPERTY(double ekfR READ ekfR WRITE setEkfR NOTIFY configChanged)
+    Q_PROPERTY(double ekfP0 READ ekfP0 WRITE setEkfP0 NOTIFY configChanged)
+
+    Q_PROPERTY(double axisXMin READ axisXMin NOTIFY axisRangeChanged)
+    Q_PROPERTY(double axisXMax READ axisXMax NOTIFY axisRangeChanged)
+    Q_PROPERTY(double axisYMin READ axisYMin NOTIFY axisRangeChanged)
+    Q_PROPERTY(double axisYMax READ axisYMax NOTIFY axisRangeChanged)
+
+    Q_PROPERTY(QAbstractListModel *logModel READ logModel CONSTANT)
+
+public:
+    explicit ADS1256Controller(QObject *parent = nullptr);
+
+    QStringList availablePorts() const;
+    bool connected() const;
+    bool acquisitionEnabled() const;
+    QString statusText() const;
+
+    QString latestAdText() const;
+    QString latestVoltageText() const;
+    QString latestHexText() const;
+    qlonglong sampleCount() const;
+
+    double vref() const;
+    int pga() const;
+    QString psel() const;
+    QString nsel() const;
+    int drate() const;
+    QString acqMode() const;
+    int viewChannel() const;
+    QString xAxisMode() const;
+    double windowSeconds() const;
+
+    bool ekfEnabled() const;
+    double ekfQ() const;
+    double ekfR() const;
+    double ekfP0() const;
+
+    double axisXMin() const;
+    double axisXMax() const;
+    double axisYMin() const;
+    double axisYMax() const;
+
+    QAbstractListModel *logModel();
+
+    void setVref(double value);
+    void setPga(int value);
+    void setPsel(const QString &value);
+    void setNsel(const QString &value);
+    void setDrate(int value);
+    void setAcqMode(const QString &value);
+    void setViewChannel(int value);
+    void setXAxisMode(const QString &value);
+    void setWindowSeconds(double value);
+
+    void setEkfEnabled(bool value);
+    void setEkfQ(double value);
+    void setEkfR(double value);
+    void setEkfP0(double value);
+
+    Q_INVOKABLE void refreshPorts();
+    Q_INVOKABLE QString portDeviceAt(int index) const;
+    Q_INVOKABLE void toggleConnection(const QString &device, int baud);
+    Q_INVOKABLE void disconnectSerial();
+    Q_INVOKABLE void toggleCapture();
+
+    Q_INVOKABLE void sendCommand(const QString &command);
+    Q_INVOKABLE void sendApplyConfig();
+    Q_INVOKABLE void sendCustomCommand(const QString &command);
+    Q_INVOKABLE void clearLogView();
+    Q_INVOKABLE void clearLogStorage();
+    Q_INVOKABLE void resetEkf();
+
+    Q_INVOKABLE void attachSeries(
+        QObject *singleShadow,
+        QObject *single,
+        QObject *ch0,
+        QObject *ch1,
+        QObject *ch2,
+        QObject *ch3,
+        QObject *ch4,
+        QObject *ch5,
+        QObject *ch6,
+        QObject *ch7);
+
+    Q_INVOKABLE void setScanChannelVisible(int channel, bool visible);
+
+signals:
+    void availablePortsChanged();
+    void connectedChanged();
+    void acquisitionEnabledChanged();
+    void statusTextChanged();
+    void metricChanged();
+    void configChanged();
+    void axisRangeChanged();
+
+private:
+    void initializeDatabase();
+    void appendLog(const QString &level, const QString &message, bool persist = true);
+    void resetStats();
+    void handleLine(const QString &line);
+    void recordSingle(int adc, const QString &hexValue);
+    void recordScan8(const QVector<int> &values);
+    void sendLine(const QString &line);
+    QString buildCfgCommand() const;
+
+    double adcToVoltage(int adc) const;
+    int singleChannelIndex() const;
+    double applyEkf(int channel, double value);
+    void applyEkfParams();
+    void resetEkfFilters(bool logEvent);
+
+    void updatePlot(bool force = false);
+    void clearSeries();
+    void updateAxisRange(double xMin, double xMax, double yMin, double yMax);
+    std::pair<double, double> xRange(const QVector<double> &x) const;
+
+    void onReadyRead();
+    void onSerialError(QSerialPort::SerialPortError error);
+
+private:
+    QSerialPort *m_serial = nullptr;
+    QByteArray m_rxBuffer;
+
+    QStringList m_portLabels;
+    QStringList m_portDevices;
+
+    bool m_connected = false;
+    bool m_acquisitionEnabled = false;
+    QString m_statusText = QStringLiteral("未连接");
+
+    QString m_latestAdText = QStringLiteral("--");
+    QString m_latestVoltageText = QStringLiteral("-- V");
+    QString m_latestHexText = QStringLiteral("--");
+    qlonglong m_sampleCount = 0;
+
+    double m_vref = 2.5;
+    int m_pga = 1;
+    QString m_psel = QStringLiteral("AIN0");
+    QString m_nsel = QStringLiteral("AINCOM");
+    int m_drate = 0x82;
+    QString m_acqMode = QStringLiteral("SINGLE");
+    int m_viewChannel = 0;
+    QString m_xAxisMode = QStringLiteral("FULL");
+    double m_windowSeconds = 1800.0;
+
+    bool m_ekfEnabled = false;
+    double m_ekfQ = 1e-6;
+    double m_ekfR = 1e-4;
+    double m_ekfP0 = 1.0;
+
+    QVector<ScalarEkf> m_ekfFilters;
+
+    qint64 m_startNs = 0;
+    qint64 m_lastPlotUpdateNs = 0;
+
+    int m_plotBufferMax = 20000;
+
+    QVector<double> m_tSingle;
+    QVector<double> m_vSingle;
+    QVector<double> m_vSingleRaw;
+
+    QVector<double> m_tScan;
+    QVector<QVector<double>> m_vScan;
+    QVector<bool> m_scanVisible;
+
+    QPointer<QXYSeries> m_singleShadowSeries;
+    QPointer<QXYSeries> m_singleSeries;
+    QVector<QPointer<QXYSeries>> m_scanSeries;
+
+    double m_axisXMin = 0.0;
+    double m_axisXMax = 1.0;
+    double m_axisYMin = -0.01;
+    double m_axisYMax = 0.01;
+
+    LogListModel m_logModel;
+    LogDatabase m_logDatabase;
+
+    QRegularExpression m_adPattern;
+    QRegularExpression m_ad8Pattern;
+    QRegularExpression m_hexPattern;
+    QRegularExpression m_pgaPattern;
+};

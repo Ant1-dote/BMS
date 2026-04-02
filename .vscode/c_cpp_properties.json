@@ -1,0 +1,36 @@
+{
+    "configurations": [
+        {
+            "name": "Win32",
+            "includePath": [
+                "${workspaceFolder}/**",
+                "C:/Qt/6.11.0/mingw_64/include/**",
+                "C:/Qt/6.11.0/mingw_64/include/QtCore",
+                "C:/Qt/6.11.0/mingw_64/include/QtGui",
+                "C:/Qt/6.11.0/mingw_64/include/QtQml",
+                "C:/Qt/6.11.0/mingw_64/include/QtQuick",
+                "C:/Qt/6.11.0/mingw_64/include/QtCharts",
+                "C:/Qt/6.11.0/mingw_64/include/QtSerialPort",
+                "C:/Qt/6.11.0/mingw_64/include/QtSql"
+            ],
+            "defines": [
+                "_DEBUG",
+                "UNICODE",
+                "_UNICODE",
+                "QT_CORE_LIB",
+                "QT_GUI_LIB",
+                "QT_QML_LIB",
+                "QT_QUICK_LIB",
+                "QT_CHARTS_LIB",
+                "QT_SERIALPORT_LIB",
+                "QT_SQL_LIB"
+            ],
+            "compilerPath": "C:/Qt/Tools/mingw1310_64/bin/g++.exe",
+            "cStandard": "c17",
+            "cppStandard": "c++17",
+            "intelliSenseMode": "gcc-x64",
+            "configurationProvider": "ms-vscode.cmake-tools"
+        }
+    ],
+    "version": 4
+}
