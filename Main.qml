@@ -863,21 +863,40 @@ ApplicationWindow {
                         }
 
                         FormLabel { text: "采样" }
-                        PrimaryActionButton {
+                        RowLayout {
                             Layout.columnSpan: 2
-                            Layout.preferredHeight: root.cPrimaryH
-                            Layout.preferredWidth: root.cStartCaptureBtnW
-                            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
-                            toneNormal: controller.acquisitionEnabled ? "#da6d56" : "#0f9f7a"
-                            toneHover: controller.acquisitionEnabled ? "#c95d48" : "#0d916f"
-                            tonePressed: controller.acquisitionEnabled ? "#b84f3c" : "#0b7f61"
-                            toneBorder: controller.acquisitionEnabled ? "#a64636" : "#0a7056"
-                            text: controller.acquisitionEnabled ? "停止连续采样" : "开始连续采样"
-                            onClicked: {
-                                if (controller.acquisitionEnabled) {
-                                    root.openStopDialog(false)
-                                } else {
-                                    controller.openCaptureDirectoryDialog()
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            PrimaryActionButton {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.cPrimaryH
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                                toneNormal: controller.acquisitionEnabled ? "#da6d56" : "#0f9f7a"
+                                toneHover: controller.acquisitionEnabled ? "#c95d48" : "#0d916f"
+                                tonePressed: controller.acquisitionEnabled ? "#b84f3c" : "#0b7f61"
+                                toneBorder: controller.acquisitionEnabled ? "#a64636" : "#0a7056"
+                                text: controller.acquisitionEnabled ? "停止连续采样" : "开始连续采样"
+                                onClicked: {
+                                    if (controller.acquisitionEnabled) {
+                                        root.openStopDialog(false)
+                                    } else {
+                                        controller.openCaptureDirectoryDialog()
+                                    }
+                                }
+                            }
+
+                            SecondaryActionButton {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: root.cPrimaryH
+                                text: controller.cycleLoopEnabled ? "停止循环充放电" : "循环充放电"
+                                enabled: controller.connected
+                                onClicked: {
+                                    if (controller.cycleLoopEnabled) {
+                                        controller.stopCycleLoop()
+                                    } else {
+                                        controller.startCycleLoop()
+                                    }
                                 }
                             }
                         }
@@ -1071,6 +1090,92 @@ ApplicationWindow {
                             onValueModified: controller.windowSeconds = value
                         }
 
+                        FormLabel { text: "放电终点" }
+                        FluentSpinBox {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            from: 100
+                            to: 10000
+                            stepSize: 10
+                            value: Math.round(controller.cycleDischargeEndVoltage * 1000)
+                            editable: true
+                            validator: IntValidator { bottom: 100; top: 10000 }
+                            textFromValue: function(v) { return (v / 1000).toFixed(3) }
+                            valueFromText: function(text) {
+                                const parsed = Number(text)
+                                if (isNaN(parsed)) {
+                                    return value
+                                }
+                                return Math.max(from, Math.min(to, Math.round(parsed * 1000)))
+                            }
+                            onValueModified: controller.cycleDischargeEndVoltage = value / 1000
+                        }
+
+                        FormLabel { text: "充电终点" }
+                        FluentSpinBox {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            from: 100
+                            to: 10000
+                            stepSize: 10
+                            value: Math.round(controller.cycleChargeEndVoltage * 1000)
+                            editable: true
+                            validator: IntValidator { bottom: 100; top: 10000 }
+                            textFromValue: function(v) { return (v / 1000).toFixed(3) }
+                            valueFromText: function(text) {
+                                const parsed = Number(text)
+                                if (isNaN(parsed)) {
+                                    return value
+                                }
+                                return Math.max(from, Math.min(to, Math.round(parsed * 1000)))
+                            }
+                            onValueModified: controller.cycleChargeEndVoltage = value / 1000
+                        }
+
+                        FormLabel { text: "判定点数" }
+                        FluentSpinBox {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            from: 1
+                            to: 200
+                            value: controller.cycleConfirmSamples
+                            onValueModified: controller.cycleConfirmSamples = value
+                        }
+
+                        FormLabel { text: "循环次数" }
+                        FluentSpinBox {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            from: 0
+                            to: 9999
+                            value: controller.cycleMaxCount
+                            onValueModified: controller.cycleMaxCount = value
+                        }
+
+                        FormLabel { text: "循环状态" }
+                        Rectangle {
+                            Layout.columnSpan: 3
+                            Layout.fillWidth: true
+                            implicitHeight: root.cControlH
+                            color: root.cStatusBg
+                            radius: 8
+                            border.color: root.cStatusBorder
+
+                            Label {
+                                anchors.centerIn: parent
+                                anchors.verticalCenterOffset: -1
+                                text: controller.cycleOverlayVisible
+                                      ? (controller.cyclePhaseText + " | 完成循环: " + controller.cycleCompletedCount)
+                                      : "空闲"
+                                color: root.cText
+                                font.pixelSize: 12
+                            }
+                        }
+
                         Item { Layout.fillWidth: true }
                         PrimaryActionButton {
                             Layout.columnSpan: 3
@@ -1225,6 +1330,74 @@ ApplicationWindow {
                                 Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
                                 text: "唤醒 WAKEUP"
                                 onClicked: controller.sendCommand("WAKEUP")
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            radius: 8
+                            color: root.cIndustrialSurfaceLow
+                            border.color: root.cIndustrialBorderStrong
+                            border.width: 1
+                            implicitHeight: relayGrid.implicitHeight + 20
+
+                            GridLayout {
+                                id: relayGrid
+                                anchors.fill: parent
+                                anchors.margins: 10
+                                columns: 2
+                                rowSpacing: 10
+                                columnSpacing: 12
+
+                                Label {
+                                    Layout.columnSpan: 2
+                                    text: "继电器控制"
+                                    color: root.cTitle
+                                    font.pixelSize: 13
+                                    font.bold: true
+                                }
+
+                                Label {
+                                    text: "1路 充电"
+                                    color: root.cText
+                                    font.pixelSize: 13
+                                }
+                                Switch {
+                                    id: relayChargeSwitch
+                                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                                    enabled: controller.connected && !controller.cycleLoopEnabled
+                                    text: checked ? "开启" : "关闭"
+                                    onClicked: {
+                                        controller.sendCommand("RELAY 1 " + (checked ? "ON" : "OFF"))
+                                    }
+                                }
+
+                                Label {
+                                    text: "2路 放电"
+                                    color: root.cText
+                                    font.pixelSize: 13
+                                }
+                                Switch {
+                                    id: relayDischargeSwitch
+                                    Layout.alignment: Qt.AlignRight | Qt.AlignVCenter
+                                    enabled: controller.connected && !controller.cycleLoopEnabled
+                                    text: checked ? "开启" : "关闭"
+                                    onClicked: {
+                                        controller.sendCommand("RELAY 2 " + (checked ? "ON" : "OFF"))
+                                    }
+                                }
+
+                                SecondaryActionButton {
+                                    Layout.columnSpan: 2
+                                    Layout.fillWidth: true
+                                    text: "全部断开"
+                                    enabled: controller.connected && !controller.cycleLoopEnabled
+                                    onClicked: {
+                                        relayChargeSwitch.checked = false
+                                        relayDischargeSwitch.checked = false
+                                        controller.sendCommand("RELAY ALL OFF")
+                                    }
+                                }
                             }
                         }
 
@@ -1496,6 +1669,12 @@ ApplicationWindow {
                             property real startY: 0
                             function zoomMapSeries() {
                                 if (!root.multiMode) {
+                                    const cycleSeries = [cycle0, cycle1, cycle2, cycle3, cycle4, cycle5, cycle6, cycle7]
+                                    for (let i = 0; i < cycleSeries.length; ++i) {
+                                        if (cycleSeries[i] && cycleSeries[i].visible) {
+                                            return cycleSeries[i]
+                                        }
+                                    }
                                     return singleSeries
                                 }
 
@@ -1518,7 +1697,7 @@ ApplicationWindow {
                                 plotAreaColor: "#ffffff"
                                 backgroundRoundness: 8
                                 dropShadowEnabled: false
-                                legend.visible: root.multiMode
+                                legend.visible: root.multiMode || controller.cycleOverlayVisible || controller.cycleLoopEnabled
                                 legend.alignment: Qt.AlignBottom
                                 legend.labelColor: root.cSubtle
                                 legend.font.pixelSize: 11
@@ -1571,6 +1750,15 @@ ApplicationWindow {
                                     name: "Filtered"
                                 }
 
+                                LineSeries { id: cycle0; axisX: axisX; axisY: axisY; color: "#ff5c5c"; width: 2.1; visible: false; name: "Cycle 1" }
+                                LineSeries { id: cycle1; axisX: axisX; axisY: axisY; color: "#ff9f43"; width: 2.1; visible: false; name: "Cycle 2" }
+                                LineSeries { id: cycle2; axisX: axisX; axisY: axisY; color: "#f6c445"; width: 2.1; visible: false; name: "Cycle 3" }
+                                LineSeries { id: cycle3; axisX: axisX; axisY: axisY; color: "#26c281"; width: 2.1; visible: false; name: "Cycle 4" }
+                                LineSeries { id: cycle4; axisX: axisX; axisY: axisY; color: "#2d98da"; width: 2.1; visible: false; name: "Cycle 5" }
+                                LineSeries { id: cycle5; axisX: axisX; axisY: axisY; color: "#6c5ce7"; width: 2.1; visible: false; name: "Cycle 6" }
+                                LineSeries { id: cycle6; axisX: axisX; axisY: axisY; color: "#e667af"; width: 2.1; visible: false; name: "Cycle 7" }
+                                LineSeries { id: cycle7; axisX: axisX; axisY: axisY; color: "#00b894"; width: 2.1; visible: false; name: "Cycle 8" }
+
                                 LineSeries { id: ch0; axisX: axisX; axisY: axisY; color: channelColors[0]; name: "AIN0" }
                                 LineSeries { id: ch1; axisX: axisX; axisY: axisY; color: channelColors[1]; name: "AIN1" }
                                 LineSeries { id: ch2; axisX: axisX; axisY: axisY; color: channelColors[2]; name: "AIN2" }
@@ -1592,6 +1780,16 @@ ApplicationWindow {
                                         ch5,
                                         ch6,
                                         ch7)
+
+                                    controller.attachCycleSeries(
+                                        cycle0,
+                                        cycle1,
+                                        cycle2,
+                                        cycle3,
+                                        cycle4,
+                                        cycle5,
+                                        cycle6,
+                                        cycle7)
                                 }
                             }
 

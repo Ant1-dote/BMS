@@ -41,6 +41,8 @@ constexpr double kAutoYClipRatio = 0.01;
 constexpr double kHourAxisThresholdSeconds = 3600.0;
 constexpr double kLatestDataXAxisRatio = 0.7;
 constexpr qint64 kZoomCsvMaxRows = 2'000'000;
+constexpr int kCycleOverlaySeriesCount = 8;
+constexpr qint64 kCycleMinPhaseDurationNs = 3'000'000'000;
 
 QString shortDescription(const QString &text)
 {
@@ -48,6 +50,11 @@ QString shortDescription(const QString &text)
         return text;
     }
     return text.left(19) + QStringLiteral("...");
+}
+
+QString cyclePhaseLabel(bool charging)
+{
+    return charging ? QStringLiteral("充电阶段") : QStringLiteral("放电阶段");
 }
 
 template <typename Series>
@@ -488,6 +495,7 @@ ADS1256Controller::ADS1256Controller(QObject *parent)
     , m_vScan(8)
     , m_scanVisible(8, true)
     , m_scanSeries(8)
+    , m_cycleSeries(kCycleOverlaySeriesCount)
     , m_zoomScanPoints(8)
     , m_adPattern(QStringLiteral(R"(AD\s*:\s*(-?\d+))"), QRegularExpression::CaseInsensitiveOption)
     , m_ad8Pattern(QStringLiteral(R"(AD8\s*:\s*(-?\d+(?:\s*,\s*-?\d+){7}))"), QRegularExpression::CaseInsensitiveOption)
@@ -670,6 +678,46 @@ bool ADS1256Controller::zoomActive() const
     return m_zoomActive;
 }
 
+bool ADS1256Controller::cycleLoopEnabled() const
+{
+    return m_cycleLoopEnabled;
+}
+
+QString ADS1256Controller::cyclePhaseText() const
+{
+    return m_cyclePhaseText;
+}
+
+int ADS1256Controller::cycleCompletedCount() const
+{
+    return m_cycleCompletedCount;
+}
+
+bool ADS1256Controller::cycleOverlayVisible() const
+{
+    return !m_cycleTraces.isEmpty();
+}
+
+double ADS1256Controller::cycleDischargeEndVoltage() const
+{
+    return m_cycleDischargeEndVoltage;
+}
+
+double ADS1256Controller::cycleChargeEndVoltage() const
+{
+    return m_cycleChargeEndVoltage;
+}
+
+int ADS1256Controller::cycleConfirmSamples() const
+{
+    return m_cycleConfirmSamples;
+}
+
+int ADS1256Controller::cycleMaxCount() const
+{
+    return m_cycleMaxCount;
+}
+
 QAbstractListModel *ADS1256Controller::logModel()
 {
     return &m_logModel;
@@ -734,6 +782,9 @@ void ADS1256Controller::setAcqMode(const QString &value)
         return;
     }
     m_acqMode = mode;
+    if (m_cycleLoopEnabled && m_acqMode != QStringLiteral("SINGLE")) {
+        stopCycleLoopInternal(true, false, QStringLiteral("切换到多通道模式，自动循环已终止"));
+    }
     m_zoomActive = false;
     clearZoomCache();
     emit configChanged();
@@ -828,6 +879,46 @@ void ADS1256Controller::setEkfP0(double value)
     emit configChanged();
 }
 
+void ADS1256Controller::setCycleDischargeEndVoltage(double value)
+{
+    value = qBound(0.1, value, 10.0);
+    if (qFuzzyCompare(m_cycleDischargeEndVoltage, value)) {
+        return;
+    }
+    m_cycleDischargeEndVoltage = value;
+    emit cycleConfigChanged();
+}
+
+void ADS1256Controller::setCycleChargeEndVoltage(double value)
+{
+    value = qBound(0.1, value, 10.0);
+    if (qFuzzyCompare(m_cycleChargeEndVoltage, value)) {
+        return;
+    }
+    m_cycleChargeEndVoltage = value;
+    emit cycleConfigChanged();
+}
+
+void ADS1256Controller::setCycleConfirmSamples(int value)
+{
+    value = qBound(1, value, 1000);
+    if (m_cycleConfirmSamples == value) {
+        return;
+    }
+    m_cycleConfirmSamples = value;
+    emit cycleConfigChanged();
+}
+
+void ADS1256Controller::setCycleMaxCount(int value)
+{
+    value = qBound(0, value, 100000);
+    if (m_cycleMaxCount == value) {
+        return;
+    }
+    m_cycleMaxCount = value;
+    emit cycleConfigChanged();
+}
+
 void ADS1256Controller::refreshPorts()
 {
     QStringList labels;
@@ -916,6 +1007,10 @@ void ADS1256Controller::disconnectSerial()
         return;
     }
 
+    if (m_cycleLoopEnabled) {
+        stopCycleLoopInternal(true, false, QStringLiteral("串口断开，自动循环已终止"));
+    }
+
     if (m_acquisitionEnabled) {
         stopCapture(true);
     }
@@ -976,6 +1071,10 @@ void ADS1256Controller::stopCapture(bool saveData)
 {
     if (!m_acquisitionEnabled) {
         return;
+    }
+
+    if (m_cycleLoopEnabled) {
+        stopCycleLoopInternal(true, false, QStringLiteral("采样停止，自动循环已终止"));
     }
 
     m_acquisitionEnabled = false;
@@ -1227,6 +1326,281 @@ void ADS1256Controller::attachSeries(
         }
     }
 
+    updatePlot(true);
+}
+
+void ADS1256Controller::attachCycleSeries(
+    QObject *cycle0,
+    QObject *cycle1,
+    QObject *cycle2,
+    QObject *cycle3,
+    QObject *cycle4,
+    QObject *cycle5,
+    QObject *cycle6,
+    QObject *cycle7)
+{
+    const QVector<QObject *> cycleObjects { cycle0, cycle1, cycle2, cycle3, cycle4, cycle5, cycle6, cycle7 };
+    for (int i = 0; i < m_cycleSeries.size(); ++i) {
+        m_cycleSeries[i] = qobject_cast<QXYSeries *>(cycleObjects.at(i));
+        if (m_cycleSeries[i]) {
+            m_cycleSeries[i]->clear();
+            m_cycleSeries[i]->setVisible(false);
+        }
+    }
+
+    updatePlot(true);
+}
+
+void ADS1256Controller::startCycleLoop()
+{
+    if (!m_connected || !m_serial->isOpen()) {
+        appendLog(QStringLiteral("error"), QStringLiteral("设备未连接，无法启动充放电循环"));
+        return;
+    }
+    if (m_cycleLoopEnabled) {
+        appendLog(QStringLiteral("info"), QStringLiteral("自动循环已在运行中"), false);
+        return;
+    }
+    if (m_cycleDischargeEndVoltage >= m_cycleChargeEndVoltage) {
+        appendLog(QStringLiteral("error"), QStringLiteral("阈值非法：放电终点必须小于充电终点"), false);
+        return;
+    }
+
+    if (m_acqMode != QStringLiteral("SINGLE")) {
+        appendLog(QStringLiteral("info"), QStringLiteral("自动循环已切换到 SINGLE 模式并沿用当前运行配置"), false);
+        setAcqMode(QStringLiteral("SINGLE"));
+    }
+
+    if (!m_acquisitionEnabled) {
+        appendLog(QStringLiteral("info"), QStringLiteral("自动循环触发：正在自动启动采样"), false);
+        startCapture();
+        if (!m_acquisitionEnabled) {
+            appendLog(QStringLiteral("error"), QStringLiteral("自动启动采样失败，循环未启动"), false);
+            return;
+        }
+    } else {
+        // 采样已在运行时，补发当前运行配置，确保循环使用最新设定。
+        sendLine(buildCfgCommand());
+    }
+
+    clearCycleOverlay();
+    m_cycleLoopEnabled = true;
+    m_cyclePhase = CyclePhase::Discharge;
+    m_cyclePhaseText = cyclePhaseLabel(false);
+    m_cycleConsecutiveMatches = 0;
+    beginCycleTrace(0);
+    applyRelayState(false, true);
+    appendLog(QStringLiteral("info"), QStringLiteral("循环启动继电器目标: 充电=OFF, 放电=ON"), false);
+
+    appendLog(
+        QStringLiteral("info"),
+        QStringLiteral("自动循环启动：先放电后充电，放电<=%1V，充电>=%2V，连续%3点判定")
+            .arg(m_cycleDischargeEndVoltage, 0, 'f', 3)
+            .arg(m_cycleChargeEndVoltage, 0, 'f', 3)
+            .arg(m_cycleConfirmSamples),
+        false);
+
+    emit cycleLoopChanged();
+    updatePlot(true);
+}
+
+void ADS1256Controller::stopCycleLoop()
+{
+    stopCycleLoopInternal(true, false, QStringLiteral("手动停止自动循环"));
+}
+
+void ADS1256Controller::clearCycleOverlay()
+{
+    m_cycleTraces.clear();
+    m_cycleCompletedCount = 0;
+    m_cycleTraceSeed = 0;
+    m_cycleStartNs = 0;
+    m_cyclePhaseStartNs = 0;
+    m_cycleConsecutiveMatches = 0;
+    m_cyclePhase = CyclePhase::Idle;
+    m_cyclePhaseText = QStringLiteral("空闲");
+
+    for (const auto &series : m_cycleSeries) {
+        if (series) {
+            series->clear();
+            series->setVisible(false);
+        }
+    }
+
+    emit cycleLoopChanged();
+}
+
+void ADS1256Controller::beginCycleTrace(qint64 nowNs)
+{
+    CycleTrace trace;
+    trace.cycleIndex = ++m_cycleTraceSeed;
+    m_cycleTraces.push_back(trace);
+    while (m_cycleTraces.size() > kCycleOverlaySeriesCount) {
+        m_cycleTraces.removeFirst();
+    }
+
+    m_cycleStartNs = nowNs;
+    m_cyclePhaseStartNs = nowNs;
+    m_cycleConsecutiveMatches = 0;
+    emit cycleLoopChanged();
+}
+
+void ADS1256Controller::appendCyclePoint(double elapsedSeconds, double voltage)
+{
+    if (m_cycleTraces.isEmpty()) {
+        return;
+    }
+
+    CycleTrace &trace = m_cycleTraces.last();
+    trace.t.push_back(elapsedSeconds);
+    trace.v.push_back(voltage);
+    if (trace.t.size() > static_cast<size_t>(m_plotBufferMax)) {
+        trace.t.pop_front();
+        trace.v.pop_front();
+    }
+}
+
+void ADS1256Controller::evaluateCycleTransition(double voltage, qint64 nowNs)
+{
+    if (!m_cycleLoopEnabled || m_cyclePhase == CyclePhase::Idle) {
+        return;
+    }
+
+    if (m_cyclePhaseStartNs <= 0) {
+        m_cyclePhaseStartNs = nowNs;
+    }
+
+    const qint64 phaseElapsedNs = qMax<qint64>(0, nowNs - m_cyclePhaseStartNs);
+    const bool dischargePhase = (m_cyclePhase == CyclePhase::Discharge);
+    const bool conditionMatched = dischargePhase
+        ? (voltage <= m_cycleDischargeEndVoltage)
+        : (voltage >= m_cycleChargeEndVoltage);
+
+    if (conditionMatched) {
+        ++m_cycleConsecutiveMatches;
+    } else {
+        m_cycleConsecutiveMatches = 0;
+    }
+
+    if (m_cycleConsecutiveMatches < qMax(1, m_cycleConfirmSamples)) {
+        return;
+    }
+    if (phaseElapsedNs < kCycleMinPhaseDurationNs) {
+        return;
+    }
+
+    if (dischargePhase) {
+        switchCyclePhase(true, nowNs);
+        return;
+    }
+
+    ++m_cycleCompletedCount;
+    emit cycleLoopChanged();
+
+    if (m_cycleMaxCount > 0 && m_cycleCompletedCount >= m_cycleMaxCount) {
+        stopCycleLoopInternal(
+            true,
+            true,
+            QStringLiteral("已完成 %1 个循环，自动停止").arg(m_cycleCompletedCount));
+        return;
+    }
+
+    appendLog(QStringLiteral("ok"), QStringLiteral("第 %1 个循环完成，进入下一轮放电").arg(m_cycleCompletedCount), false);
+    beginCycleTrace(nowNs);
+    switchCyclePhase(false, nowNs);
+}
+
+void ADS1256Controller::switchCyclePhase(bool toCharge, qint64 nowNs)
+{
+    m_cyclePhase = toCharge ? CyclePhase::Charge : CyclePhase::Discharge;
+    m_cyclePhaseText = cyclePhaseLabel(toCharge);
+    m_cyclePhaseStartNs = nowNs;
+    m_cycleConsecutiveMatches = 0;
+
+    if (toCharge) {
+        applyRelayState(true, false);
+        appendLog(QStringLiteral("info"), QStringLiteral("放电终点触发，切换到充电阶段"), false);
+    } else {
+        applyRelayState(false, true);
+        appendLog(QStringLiteral("info"), QStringLiteral("充电终点触发，切换到放电阶段"), false);
+    }
+
+    emit cycleLoopChanged();
+}
+
+void ADS1256Controller::applyRelayState(bool chargeOn, bool dischargeOn)
+{
+    if (!m_serial || !m_serial->isOpen()) {
+        return;
+    }
+
+    const quint32 seq = ++m_relayApplySeq;
+
+    // 先统一断开，再按目标状态逐路开启，减少串口连发时的误动作概率。
+    sendLine(QStringLiteral("RELAY ALL OFF"));
+
+    int delayMs = 90;
+    if (chargeOn) {
+        QTimer::singleShot(delayMs, this, [this, seq]() {
+            if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
+                return;
+            }
+            sendLine(QStringLiteral("RELAY 1 ON"));
+        });
+        delayMs += 90;
+    }
+
+    if (dischargeOn) {
+        QTimer::singleShot(delayMs, this, [this, seq]() {
+            if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
+                return;
+            }
+            sendLine(QStringLiteral("RELAY 2 ON"));
+        });
+        delayMs += 90;
+    }
+
+    // 补一轮重试，处理偶发丢帧或下位机忙导致的未执行。
+    QTimer::singleShot(delayMs + 220, this, [this, seq, chargeOn, dischargeOn]() {
+        if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
+            return;
+        }
+
+        if (!chargeOn && !dischargeOn) {
+            sendLine(QStringLiteral("RELAY ALL OFF"));
+            return;
+        }
+
+        if (chargeOn) {
+            sendLine(QStringLiteral("RELAY 1 ON"));
+        }
+        if (dischargeOn) {
+            sendLine(QStringLiteral("RELAY 2 ON"));
+        }
+    });
+}
+
+void ADS1256Controller::stopCycleLoopInternal(bool powerOffRelays, bool completed, const QString &reason)
+{
+    if (!m_cycleLoopEnabled && m_cyclePhase == CyclePhase::Idle) {
+        return;
+    }
+
+    m_cycleLoopEnabled = false;
+    m_cyclePhase = CyclePhase::Idle;
+    m_cyclePhaseText = completed ? QStringLiteral("循环完成") : QStringLiteral("空闲");
+    m_cycleConsecutiveMatches = 0;
+    m_cyclePhaseStartNs = 0;
+
+    if (powerOffRelays) {
+        applyRelayState(false, false);
+    }
+
+    if (!reason.trimmed().isEmpty()) {
+        appendLog(completed ? QStringLiteral("ok") : QStringLiteral("info"), reason, false);
+    }
+
+    emit cycleLoopChanged();
     updatePlot(true);
 }
 
@@ -2145,6 +2519,9 @@ void ADS1256Controller::resetStats()
     m_scanFrameSeq = 0;
     clearZoomCache();
 
+    m_cycleLoopEnabled = false;
+    clearCycleOverlay();
+
     m_pendingSamples.clear();
     if (m_pendingSamples.capacity() < kSqlBufferFlushCount * 2) {
         m_pendingSamples.reserve(kSqlBufferFlushCount * 2);
@@ -2335,6 +2712,22 @@ void ADS1256Controller::recordSingle(int adc, const QString &hexValue)
     m_latestVoltageText = QStringLiteral("%1 V").arg(filtered, 0, 'f', 6);
     m_latestHexText = hexValue;
     emit metricChanged();
+
+    if (m_cycleLoopEnabled) {
+        if (m_cycleTraces.isEmpty()) {
+            beginCycleTrace(nowNs);
+        }
+        if (m_cycleStartNs <= 0) {
+            m_cycleStartNs = nowNs;
+        }
+        if (m_cyclePhaseStartNs <= 0) {
+            m_cyclePhaseStartNs = nowNs;
+        }
+
+        const double cycleElapsedSeconds = static_cast<double>(qMax<qint64>(0, nowNs - m_cycleStartNs)) / 1'000'000'000.0;
+        appendCyclePoint(cycleElapsedSeconds, filtered);
+        evaluateCycleTransition(filtered, nowNs);
+    }
 
     const SampleEntry sample {
         elapsedNs,
@@ -2582,6 +2975,83 @@ void ADS1256Controller::updatePlot(bool force)
         return;
     }
 
+    const bool hasCycleOverlayData = !m_cycleTraces.isEmpty();
+    if (hasCycleOverlayData) {
+        for (int ch = 0; ch < 8; ++ch) {
+            if (m_scanSeries[ch]) {
+                m_scanSeries[ch]->clear();
+            }
+        }
+        if (m_singleShadowSeries) {
+            m_singleShadowSeries->clear();
+        }
+        if (m_singleSeries) {
+            m_singleSeries->clear();
+        }
+
+        double dataRight = 0.0;
+        for (const CycleTrace &trace : std::as_const(m_cycleTraces)) {
+            dataRight = qMax(dataRight, inferredLatestX(trace.t));
+        }
+        dataRight = qMax(0.05, dataRight);
+
+        double xMin = 0.0;
+        double xMax = qMax(1.0, dataRight / kLatestDataXAxisRatio);
+        if (m_zoomActive) {
+            xMin = qBound(0.0, m_zoomXMin, dataRight);
+            xMax = qBound(xMin + 0.05, m_zoomXMax, qMax(dataRight, xMin + 0.05));
+        }
+
+        const bool useHourAxis = shouldUseHourAxis(xMax);
+        const double xScale = axisDisplayScale(useHourAxis);
+        const bool axisUnitChanged = (m_axisXInHours != useHourAxis);
+        m_axisXInHours = useHourAxis;
+
+        const int visibleCount = qMin(m_cycleSeries.size(), m_cycleTraces.size());
+        const int firstTraceIndex = qMax(0, m_cycleTraces.size() - visibleCount);
+        QVector<double> yVisible;
+        yVisible.reserve(qMax(256, visibleCount * 320));
+
+        for (int i = 0; i < m_cycleSeries.size(); ++i) {
+            QXYSeries *series = m_cycleSeries[i];
+            if (!series) {
+                continue;
+            }
+
+            const int traceIndex = firstTraceIndex + i;
+            if (i >= visibleCount || traceIndex < 0 || traceIndex >= m_cycleTraces.size()) {
+                series->clear();
+                series->setVisible(false);
+                continue;
+            }
+
+            const CycleTrace &trace = m_cycleTraces.at(traceIndex);
+            QList<QPointF> points = scalePointsX(
+                pickPlotPoints(trace.t, trace.v, xMin, xMax, m_zoomActive),
+                xScale);
+            series->replace(points);
+            series->setName(QStringLiteral("Cycle %1").arg(trace.cycleIndex));
+            series->setVisible(true);
+
+            if (!points.isEmpty()) {
+                yVisible += extractY(points);
+            }
+        }
+
+        const auto [yMin, yMax] = m_zoomActive
+            ? std::pair<double, double> { m_zoomYMin, m_zoomYMax }
+            : yBoundsFromValues(yVisible);
+        updateAxisRange(xMin / xScale, xMax / xScale, yMin, yMax, axisUnitChanged);
+        return;
+    }
+
+    for (const auto &series : m_cycleSeries) {
+        if (series) {
+            series->clear();
+            series->setVisible(false);
+        }
+    }
+
     const bool hasZoomSingleData = m_zoomActive
         && m_zoomCacheReady
         && !m_zoomSinglePoints.isEmpty();
@@ -2660,6 +3130,12 @@ void ADS1256Controller::clearSeries()
     for (const auto &series : m_scanSeries) {
         if (series) {
             series->clear();
+        }
+    }
+    for (const auto &series : m_cycleSeries) {
+        if (series) {
+            series->clear();
+            series->setVisible(false);
         }
     }
     const bool unitChanged = m_axisXInHours;

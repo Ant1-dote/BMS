@@ -58,6 +58,15 @@ class ADS1256Controller : public QObject {
     Q_PROPERTY(double axisYMax READ axisYMax NOTIFY axisRangeChanged)
     Q_PROPERTY(bool zoomActive READ zoomActive NOTIFY axisRangeChanged)
 
+    Q_PROPERTY(bool cycleLoopEnabled READ cycleLoopEnabled NOTIFY cycleLoopChanged)
+    Q_PROPERTY(QString cyclePhaseText READ cyclePhaseText NOTIFY cycleLoopChanged)
+    Q_PROPERTY(int cycleCompletedCount READ cycleCompletedCount NOTIFY cycleLoopChanged)
+    Q_PROPERTY(bool cycleOverlayVisible READ cycleOverlayVisible NOTIFY cycleLoopChanged)
+    Q_PROPERTY(double cycleDischargeEndVoltage READ cycleDischargeEndVoltage WRITE setCycleDischargeEndVoltage NOTIFY cycleConfigChanged)
+    Q_PROPERTY(double cycleChargeEndVoltage READ cycleChargeEndVoltage WRITE setCycleChargeEndVoltage NOTIFY cycleConfigChanged)
+    Q_PROPERTY(int cycleConfirmSamples READ cycleConfirmSamples WRITE setCycleConfirmSamples NOTIFY cycleConfigChanged)
+    Q_PROPERTY(int cycleMaxCount READ cycleMaxCount WRITE setCycleMaxCount NOTIFY cycleConfigChanged)
+
     Q_PROPERTY(QAbstractListModel *logModel READ logModel CONSTANT)
 
 public:
@@ -96,6 +105,15 @@ public:
     double axisYMax() const;
     bool zoomActive() const;
 
+    bool cycleLoopEnabled() const;
+    QString cyclePhaseText() const;
+    int cycleCompletedCount() const;
+    bool cycleOverlayVisible() const;
+    double cycleDischargeEndVoltage() const;
+    double cycleChargeEndVoltage() const;
+    int cycleConfirmSamples() const;
+    int cycleMaxCount() const;
+
     QAbstractListModel *logModel();
 
     void setVref(double value);
@@ -112,6 +130,10 @@ public:
     void setEkfQ(double value);
     void setEkfR(double value);
     void setEkfP0(double value);
+    void setCycleDischargeEndVoltage(double value);
+    void setCycleChargeEndVoltage(double value);
+    void setCycleConfirmSamples(int value);
+    void setCycleMaxCount(int value);
 
     Q_INVOKABLE void refreshPorts();
     Q_INVOKABLE QString portDeviceAt(int index) const;
@@ -145,6 +167,18 @@ public:
         QObject *ch5,
         QObject *ch6,
         QObject *ch7);
+    Q_INVOKABLE void attachCycleSeries(
+        QObject *cycle0,
+        QObject *cycle1,
+        QObject *cycle2,
+        QObject *cycle3,
+        QObject *cycle4,
+        QObject *cycle5,
+        QObject *cycle6,
+        QObject *cycle7);
+
+    Q_INVOKABLE void startCycleLoop();
+    Q_INVOKABLE void stopCycleLoop();
 
     Q_INVOKABLE void setScanChannelVisible(int channel, bool visible);
     // Toggle whether a multi-channel lane participates in sampling (maps to CFG CHMASK).
@@ -160,6 +194,8 @@ signals:
     void metricChanged();
     void configChanged();
     void axisRangeChanged();
+    void cycleLoopChanged();
+    void cycleConfigChanged();
 
 private:
     void initializeDatabase();
@@ -195,6 +231,13 @@ private:
     double applyEkf(int channel, double value);
     void applyEkfParams();
     void resetEkfFilters(bool logEvent);
+    void clearCycleOverlay();
+    void beginCycleTrace(qint64 nowNs);
+    void appendCyclePoint(double elapsedSeconds, double voltage);
+    void evaluateCycleTransition(double voltage, qint64 nowNs);
+    void switchCyclePhase(bool toCharge, qint64 nowNs);
+    void applyRelayState(bool chargeOn, bool dischargeOn);
+    void stopCycleLoopInternal(bool powerOffRelays, bool completed, const QString &reason);
 
     void updatePlot(bool force = false);
     void clearSeries();
@@ -205,6 +248,18 @@ private:
     void onSerialError(QSerialPort::SerialPortError error);
 
 private:
+    enum class CyclePhase {
+        Idle,
+        Discharge,
+        Charge,
+    };
+
+    struct CycleTrace {
+        int cycleIndex = 0;
+        std::deque<double> t;
+        std::deque<double> v;
+    };
+
     QSerialPort *m_serial = nullptr;
     QByteArray m_rxBuffer;
     bool m_rxOverflowWarned = false;
@@ -267,6 +322,7 @@ private:
     QPointer<QXYSeries> m_singleShadowSeries;
     QPointer<QXYSeries> m_singleSeries;
     QVector<QPointer<QXYSeries>> m_scanSeries;
+    QVector<QPointer<QXYSeries>> m_cycleSeries;
 
     double m_axisXMin = 0.0;
     double m_axisXMax = 1.0;
@@ -283,6 +339,21 @@ private:
     QList<QPointF> m_zoomSingleRawPoints;
     QList<QPointF> m_zoomSinglePoints;
     QVector<QList<QPointF>> m_zoomScanPoints;
+
+    bool m_cycleLoopEnabled = false;
+    CyclePhase m_cyclePhase = CyclePhase::Idle;
+    QString m_cyclePhaseText = QStringLiteral("空闲");
+    int m_cycleCompletedCount = 0;
+    int m_cycleTraceSeed = 0;
+    qint64 m_cycleStartNs = 0;
+    qint64 m_cyclePhaseStartNs = 0;
+    int m_cycleConsecutiveMatches = 0;
+    double m_cycleDischargeEndVoltage = 3.2;
+    double m_cycleChargeEndVoltage = 4.2;
+    int m_cycleConfirmSamples = 8;
+    int m_cycleMaxCount = 0;
+    QVector<CycleTrace> m_cycleTraces;
+    quint32 m_relayApplySeq = 0;
 
     QString m_storageDir;
     QString m_logDbPath;

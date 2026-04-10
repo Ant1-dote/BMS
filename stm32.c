@@ -6,28 +6,55 @@
   ******************************************************************************
   */
 /* USER CODE END Header */
-
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
 #include "usb_device.h"
+
+/* Private includes ----------------------------------------------------------*/
+/* USER CODE BEGIN Includes */
+
 #include "usbd_cdc.h"
 #include "usbd_cdc_if.h"
 
-#include <limits.h>
 #include <ctype.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
+/* USER CODE END Includes */
+
+/* Private typedef -----------------------------------------------------------*/
+/* USER CODE BEGIN PTD */
+
+/* USER CODE END PTD */
+
+/* Private define ------------------------------------------------------------*/
+/* USER CODE BEGIN PD */
+
+/* USER CODE END PD */
+
+/* Private macro -------------------------------------------------------------*/
+/* USER CODE BEGIN PM */
+
+/* USER CODE END PM */
+
 /* Private variables ---------------------------------------------------------*/
 SPI_HandleTypeDef hspi1;
+
+UART_HandleTypeDef huart2;
+UART_HandleTypeDef huart6;
+
+/* USER CODE BEGIN PV */
+
+/* USER CODE END PV */
 
 /* Private function prototypes -----------------------------------------------*/
 void SystemClock_Config(void);
 static void MX_GPIO_Init(void);
 static void MX_SPI1_Init(void);
-
+static void MX_USART2_UART_Init(void);
+static void MX_USART6_UART_Init(void);
 /* USER CODE BEGIN PFP */
 
 /* ================== 如果在CubeMX中未定义硬件复位引脚，这里提供默认值 ================== */
@@ -35,6 +62,26 @@ static void MX_SPI1_Init(void);
 #define RST_Pin       GPIO_PIN_2
 #define RST_GPIO_Port GPIOA
 #endif
+
+/* DRDY 实际硬件已切换到 PB0，这里强制使用 PB0 映射。 */
+#ifdef DRDY_Pin
+#undef DRDY_Pin
+#endif
+#ifdef DRDY_GPIO_Port
+#undef DRDY_GPIO_Port
+#endif
+#define DRDY_Pin       GPIO_PIN_0
+#define DRDY_GPIO_Port GPIOB
+
+/* ================== 继电器 Modbus RTU 参数 ================== */
+#define RELAY_MODBUS_FUNC_WRITE_SINGLE_COIL 0x05U
+#define RELAY_MODBUS_COIL_ON_VALUE          0xFF00U
+#define RELAY_MODBUS_COIL_OFF_VALUE         0x0000U
+#define RELAY1_COIL_ADDR                    0x0000U
+#define RELAY2_COIL_ADDR                    0x0001U
+#define RELAY_MODBUS_TX_TIMEOUT_MS          100U
+/* 调试阶段建议开启严格回包：超时即报错，便于定位链路问题。 */
+#define RELAY_MODBUS_REQUIRE_RESPONSE       1U
 
 /* ================== ADS1256 宏定义 ================== */
 /* 寄存器地址 */
@@ -101,28 +148,28 @@ static void MX_SPI1_Init(void);
 #define ADS1256_DELAY_T6_US     8U
 /* t11 对 SYNC/RDATAC 场景需 >= 24 * tCLKIN (约 3.13us) */
 #define ADS1256_DELAY_T11_US    4U
-/* 读出24位结果后，给DRDY恢复到高电平的最小缓冲时间。 */
-#define ADS1256_DELAY_DRDY_RECOVER_US 2U
 
 /* 基础底层函数 */
 static HAL_StatusTypeDef ADS1256_WriteReg(uint8_t reg, uint8_t value);
 static HAL_StatusTypeDef ADS1256_SendCmd(uint8_t cmd);
 static HAL_StatusTypeDef ADS1256_ReadReg(uint8_t reg, uint8_t *value);
 static HAL_StatusTypeDef ADS1256_WaitDRDY(uint32_t timeout_ms);
-static HAL_StatusTypeDef ADS1256_WaitDRDYEdge(uint32_t timeout_ms);
 static void ADS1256_DelayUs(uint32_t us);
 static void ADS1256_EnableGPIOClock(GPIO_TypeDef *port);
 static HAL_StatusTypeDef ADS1256_SetPGAValue(uint8_t pga);
 static HAL_StatusTypeDef ADS1256_SetDataRate(uint8_t drate);
 static uint32_t ADS1256_DrdyTimeoutMsByDrate(uint8_t drate);
-static uint8_t ADS1256_ScanDiscardCountByDrate(uint8_t drate);
 static void ADS1256_ProcessPendingCommand(void);
+static int ADS1256_ParseOnOff(const char *text, uint8_t *on);
+static uint16_t Relay_ModbusCRC16(const uint8_t *data, uint16_t len);
+static void Relay_PrintFrame(const char *prefix, const uint8_t *data, uint8_t len);
+static HAL_StatusTypeDef Relay_ModbusWriteSingleCoil(uint8_t slave_addr, uint16_t coil_addr, uint8_t on);
+static HAL_StatusTypeDef Relay_SetChannel(uint8_t channel, uint8_t on);
 
 /* 功能 API */
 static HAL_StatusTypeDef ADS1256_Init(void);
 static HAL_StatusTypeDef ADS1256_SetChannel(uint8_t pos_ch, uint8_t neg_ch);
 static HAL_StatusTypeDef ADS1256_Read_ADC(uint8_t pos_ch, uint8_t neg_ch, int32_t *adc_out);
-static HAL_StatusTypeDef ADS1256_Read_ADC_CurrentRData(int32_t *adc_out);
 static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *failed_ch);
 
 /* 连续模式 (RDATAC) 功能 API */
@@ -136,6 +183,7 @@ void ADS1256_CDC_OnRxData(const uint8_t *buf, uint32_t len);
 
 /* USER CODE END PFP */
 
+/* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
 #define ADS1256_CMD_MAX_LEN 120U
@@ -176,8 +224,7 @@ static uint8_t g_rdatac_active = 0U;
 static uint16_t g_zero_streak = 0U;
 static int32_t g_scan_cache[8] = {0};
 static uint8_t g_scan_cache_valid_mask = 0U;
-static uint8_t g_rdata_last_pos = 0xFFU;
-static uint8_t g_rdata_last_neg = 0xFFU;
+static uint8_t g_relay_modbus_slave_addr = 1U;
 
 static uint8_t ADS1256_PgaToCode(uint8_t pga)
 {
@@ -239,6 +286,173 @@ static int ADS1256_ParseChannel(const char *text, uint8_t *ch)
   return 0;
 }
 
+static int ADS1256_ParseOnOff(const char *text, uint8_t *on)
+{
+  if ((text == NULL) || (on == NULL))
+  {
+    return 0;
+  }
+
+  if (ADS1256_StrEqNoCase(text, "ON") || (strcmp(text, "1") == 0))
+  {
+    *on = 1U;
+    return 1;
+  }
+
+  if (ADS1256_StrEqNoCase(text, "OFF") || (strcmp(text, "0") == 0))
+  {
+    *on = 0U;
+    return 1;
+  }
+
+  return 0;
+}
+
+static uint16_t Relay_ModbusCRC16(const uint8_t *data, uint16_t len)
+{
+  uint16_t crc = 0xFFFFU;
+  uint16_t i;
+
+  if (data == NULL)
+  {
+    return 0U;
+  }
+
+  for (i = 0U; i < len; i++)
+  {
+    uint8_t j;
+    crc ^= (uint16_t)data[i];
+    for (j = 0U; j < 8U; j++)
+    {
+      if ((crc & 0x0001U) != 0U)
+      {
+        crc = (crc >> 1) ^ 0xA001U;
+      }
+      else
+      {
+        crc >>= 1;
+      }
+    }
+  }
+
+  return crc;
+}
+
+static void Relay_PrintFrame(const char *prefix, const uint8_t *data, uint8_t len)
+{
+  uint8_t i;
+
+  if ((prefix == NULL) || (data == NULL) || (len == 0U))
+  {
+    return;
+  }
+
+  printf("%s", prefix);
+  for (i = 0U; i < len; i++)
+  {
+    printf("%02X", (unsigned int)data[i]);
+    if (i < (uint8_t)(len - 1U))
+    {
+      printf(" ");
+    }
+  }
+  printf("\r\n");
+}
+
+static HAL_StatusTypeDef Relay_ModbusWriteSingleCoil(uint8_t slave_addr, uint16_t coil_addr, uint8_t on)
+{
+  HAL_StatusTypeDef st;
+  uint8_t frame[8];
+  uint8_t resp[8];
+  uint16_t value = (on != 0U) ? RELAY_MODBUS_COIL_ON_VALUE : RELAY_MODBUS_COIL_OFF_VALUE;
+  uint16_t crc;
+  uint16_t resp_crc;
+  uint8_t i;
+
+  frame[0] = slave_addr;
+  frame[1] = RELAY_MODBUS_FUNC_WRITE_SINGLE_COIL;
+  frame[2] = (uint8_t)(coil_addr >> 8);
+  frame[3] = (uint8_t)(coil_addr & 0xFFU);
+  frame[4] = (uint8_t)(value >> 8);
+  frame[5] = (uint8_t)(value & 0xFFU);
+  crc = Relay_ModbusCRC16(frame, 6U);
+  frame[6] = (uint8_t)(crc & 0xFFU);
+  frame[7] = (uint8_t)(crc >> 8);
+
+  Relay_PrintFrame("RELAY TX: ", frame, (uint8_t)sizeof(frame));
+
+  st = HAL_UART_Transmit(&huart2, frame, sizeof(frame), RELAY_MODBUS_TX_TIMEOUT_MS);
+  if (st != HAL_OK)
+  {
+    printf("RELAY TX FAIL err=%d\r\n", (int)st);
+    return st;
+  }
+
+  st = HAL_UART_Receive(&huart2, resp, sizeof(resp), RELAY_MODBUS_TX_TIMEOUT_MS);
+  if (st == HAL_TIMEOUT)
+  {
+    printf("RELAY RX TIMEOUT\r\n");
+#if (RELAY_MODBUS_REQUIRE_RESPONSE == 1U)
+    return HAL_TIMEOUT;
+#else
+    /* 部分继电器板只执行不回包，这种场景按发送成功处理。 */
+    return HAL_OK;
+#endif
+  }
+  if (st != HAL_OK)
+  {
+    printf("RELAY RX FAIL err=%d\r\n", (int)st);
+    return st;
+  }
+
+  Relay_PrintFrame("RELAY RX: ", resp, (uint8_t)sizeof(resp));
+
+  for (i = 0U; i < 6U; i++)
+  {
+    if (resp[i] != frame[i])
+    {
+      printf("RELAY RX PAYLOAD MISMATCH idx=%u exp=%02X got=%02X\r\n",
+             (unsigned int)i,
+             (unsigned int)frame[i],
+             (unsigned int)resp[i]);
+      return HAL_ERROR;
+    }
+  }
+
+  resp_crc = Relay_ModbusCRC16(resp, 6U);
+  if ((resp[6] != (uint8_t)(resp_crc & 0xFFU)) || (resp[7] != (uint8_t)(resp_crc >> 8)))
+  {
+    printf("RELAY RX CRC MISMATCH exp=%02X %02X got=%02X %02X\r\n",
+           (unsigned int)(resp_crc & 0xFFU),
+           (unsigned int)(resp_crc >> 8),
+           (unsigned int)resp[6],
+           (unsigned int)resp[7]);
+    return HAL_ERROR;
+  }
+
+  return HAL_OK;
+}
+
+static HAL_StatusTypeDef Relay_SetChannel(uint8_t channel, uint8_t on)
+{
+  uint16_t coil_addr;
+
+  if (channel == 1U)
+  {
+    coil_addr = RELAY1_COIL_ADDR;
+  }
+  else if (channel == 2U)
+  {
+    coil_addr = RELAY2_COIL_ADDR;
+  }
+  else
+  {
+    return HAL_ERROR;
+  }
+
+  return Relay_ModbusWriteSingleCoil(g_relay_modbus_slave_addr, coil_addr, on);
+}
+
 static HAL_StatusTypeDef ADS1256_SetPGAValue(uint8_t pga)
 {
   uint8_t code = ADS1256_PgaToCode(pga);
@@ -292,25 +506,6 @@ static uint32_t ADS1256_DrdyTimeoutMsByDrate(uint8_t drate)
   }
 }
 
-static uint8_t ADS1256_ScanDiscardCountByDrate(uint8_t drate)
-{
-  switch (drate)
-  {
-    case ADS1256_DRATE_30000SPS:
-    case ADS1256_DRATE_15000SPS:
-    case ADS1256_DRATE_7500SPS:
-      return 2U;
-
-    case ADS1256_DRATE_3750SPS:
-    case ADS1256_DRATE_2000SPS:
-    case ADS1256_DRATE_1000SPS:
-      return 1U;
-
-    default:
-      return 0U;
-  }
-}
-
 static void ADS1256_CopyPendingCommand(char *dst, uint32_t dst_size)
 {
   uint32_t i;
@@ -339,7 +534,7 @@ static void ADS1256_PrintConfig(void)
 {
   char nsel_text[10];
   const char *mode_text = (g_read_mode == ADS1256_READ_RDATAC) ? "RDATAC" : "RDATA";
-  const char *acq_text = (g_sample_mode == ADS1256_SAMPLE_SCAN8) ? "MULTI" : "SINGLE";
+  const char *acq_text = (g_sample_mode == ADS1256_SAMPLE_SCAN8) ? "SCAN8" : "SINGLE";
 
   if (g_cfg_neg == ADS1256_AINCOM)
   {
@@ -419,24 +614,20 @@ static void ADS1256_ExecuteCommand(const char *line)
   if (ADS1256_StrEqNoCase(token, "SINGLE"))
   {
     g_sample_mode = ADS1256_SAMPLE_SINGLE;
-    g_rdata_last_pos = 0xFFU;
-    g_rdata_last_neg = 0xFFU;
     printf("ACQ MODE SINGLE\r\n");
     return;
   }
 
-  if (ADS1256_StrEqNoCase(token, "SCAN8") || ADS1256_StrEqNoCase(token, "MULTI"))
+  if (ADS1256_StrEqNoCase(token, "SCAN8"))
   {
     g_sample_mode = ADS1256_SAMPLE_SCAN8;
-    g_rdata_last_pos = 0xFFU;
-    g_rdata_last_neg = 0xFFU;
     if (g_rdatac_active != 0U)
     {
       (void)ADS1256_StopContinuousMode();
       g_rdatac_active = 0U;
     }
     g_read_mode = ADS1256_READ_RDATA;
-    printf("ACQ MODE MULTI\r\n");
+    printf("ACQ MODE SCAN8\r\n");
     return;
   }
 
@@ -455,8 +646,6 @@ static void ADS1256_ExecuteCommand(const char *line)
       g_scan_mask = 0xFFU;
       g_scan_cache_valid_mask = 0U;
       g_sample_mode = ADS1256_SAMPLE_SINGLE;
-      g_rdata_last_pos = 0xFFU;
-      g_rdata_last_neg = 0xFFU;
       g_zero_streak = 0U;
       printf("RESET OK\r\n");
     }
@@ -517,7 +706,7 @@ static void ADS1256_ExecuteCommand(const char *line)
   {
     if (g_sample_mode == ADS1256_SAMPLE_SCAN8)
     {
-      printf("ERR RDATAC unsupported in MULTI mode\r\n");
+      printf("ERR RDATAC unsupported in SCAN8 mode\r\n");
       return;
     }
     g_read_mode = ADS1256_READ_RDATAC;
@@ -538,6 +727,91 @@ static void ADS1256_ExecuteCommand(const char *line)
     g_zero_streak = 0U;
     printf("MODE RDATA\r\n");
     return;
+  }
+
+  if (ADS1256_StrEqNoCase(token, "RELAY"))
+  {
+    char *arg1 = strtok(NULL, " ");
+    char *arg2 = strtok(NULL, " ");
+    uint8_t on;
+    HAL_StatusTypeDef relay_st;
+
+    if (arg1 == NULL)
+    {
+      printf("ERR usage: RELAY <1|2|ALL> <ON|OFF> | RELAY ADDR <1..247>\r\n");
+      return;
+    }
+
+    if (ADS1256_StrEqNoCase(arg1, "ADDR"))
+    {
+      uint32_t addr;
+      if (arg2 == NULL)
+      {
+        printf("ERR RELAY ADDR missing\r\n");
+        return;
+      }
+
+      addr = strtoul(arg2, NULL, 10);
+      if ((addr < 1U) || (addr > 247U))
+      {
+        printf("ERR RELAY ADDR out of range(1..247)\r\n");
+        return;
+      }
+
+      g_relay_modbus_slave_addr = (uint8_t)addr;
+      printf("RELAY ADDR=%u OK\r\n", (unsigned int)g_relay_modbus_slave_addr);
+      return;
+    }
+
+    if (arg2 == NULL)
+    {
+      printf("ERR usage: RELAY <1|2|ALL> <ON|OFF>\r\n");
+      return;
+    }
+
+    if (ADS1256_ParseOnOff(arg2, &on) == 0)
+    {
+      printf("ERR RELAY state must be ON/OFF or 1/0\r\n");
+      return;
+    }
+
+    if (ADS1256_StrEqNoCase(arg1, "ALL"))
+    {
+      relay_st = Relay_SetChannel(1U, on);
+      if (relay_st == HAL_OK)
+      {
+        relay_st = Relay_SetChannel(2U, on);
+      }
+      if (relay_st == HAL_OK)
+      {
+        printf("RELAY ALL %s OK\r\n", (on != 0U) ? "ON" : "OFF");
+      }
+      else
+      {
+        printf("RELAY ALL %s FAIL err=%d\r\n", (on != 0U) ? "ON" : "OFF", (int)relay_st);
+      }
+      return;
+    }
+    else
+    {
+      uint32_t ch = strtoul(arg1, NULL, 10);
+      if ((ch != 1U) && (ch != 2U))
+      {
+        printf("ERR RELAY channel must be 1 or 2\r\n");
+        return;
+      }
+
+      relay_st = Relay_SetChannel((uint8_t)ch, on);
+      if (relay_st == HAL_OK)
+      {
+        printf("RELAY %lu %s OK\r\n", (unsigned long)ch, (on != 0U) ? "ON" : "OFF");
+      }
+      else
+      {
+        printf("RELAY %lu %s FAIL err=%d\r\n", (unsigned long)ch, (on != 0U) ? "ON" : "OFF", (int)relay_st);
+      }
+      return;
+    }
   }
 
   if (!ADS1256_StrEqNoCase(token, "CFG"))
@@ -645,7 +919,7 @@ static void ADS1256_ExecuteCommand(const char *line)
         new_acq = ADS1256_SAMPLE_SINGLE;
         has_acq = 1U;
       }
-      else if (ADS1256_StrEqNoCase(eq, "SCAN8") || ADS1256_StrEqNoCase(eq, "MULTI"))
+      else if (ADS1256_StrEqNoCase(eq, "SCAN8"))
       {
         new_acq = ADS1256_SAMPLE_SCAN8;
         has_acq = 1U;
@@ -654,19 +928,7 @@ static void ADS1256_ExecuteCommand(const char *line)
   }
 
   st = HAL_OK;
-  if (((has_pga != 0U) || (has_drate != 0U) || (has_pos != 0U) || (has_neg != 0U))
-      && (g_rdatac_active != 0U))
-  {
-    st = ADS1256_StopContinuousMode();
-    if (st == HAL_OK)
-    {
-      g_rdatac_active = 0U;
-      g_rdata_last_pos = 0xFFU;
-      g_rdata_last_neg = 0xFFU;
-    }
-  }
-
-  if ((st == HAL_OK) && (has_pga != 0U))
+  if (has_pga != 0U)
   {
     st = ADS1256_SetPGAValue(new_pga);
   }
@@ -689,8 +951,6 @@ static void ADS1256_ExecuteCommand(const char *line)
   if ((st == HAL_OK) && (has_acq != 0U))
   {
     g_sample_mode = new_acq;
-    g_rdata_last_pos = 0xFFU;
-    g_rdata_last_neg = 0xFFU;
   }
 
   if ((st == HAL_OK) && (has_scan_mask != 0U))
@@ -704,7 +964,7 @@ static void ADS1256_ExecuteCommand(const char *line)
     if ((new_acq == ADS1256_SAMPLE_SCAN8) && (new_mode == ADS1256_READ_RDATAC))
     {
       new_mode = ADS1256_READ_RDATA;
-      printf("WARN MULTI forces MODE=RDATA\r\n");
+      printf("WARN SCAN8 forces MODE=RDATA\r\n");
     }
 
     if ((new_mode == ADS1256_READ_RDATA) && (g_rdatac_active != 0U))
@@ -721,8 +981,6 @@ static void ADS1256_ExecuteCommand(const char *line)
     g_cfg_drate = new_drate;
     g_scan_mask = new_scan_mask;
     g_scan_cache_valid_mask &= g_scan_mask;
-    g_rdata_last_pos = 0xFFU;
-    g_rdata_last_neg = 0xFFU;
     ADS1256_PrintConfig();
     printf("CFG OK\r\n");
   }
@@ -874,30 +1132,6 @@ static HAL_StatusTypeDef ADS1256_WaitDRDY(uint32_t timeout_ms)
   return HAL_OK;
 }
 
-static HAL_StatusTypeDef ADS1256_WaitDRDYEdge(uint32_t timeout_ms)
-{
-  uint32_t start = HAL_GetTick();
-
-  /* 先等待当前低电平结束，避免把同一次转换结果重复判为“新数据”。 */
-  while (HAL_GPIO_ReadPin(DRDY_GPIO_Port, DRDY_Pin) == GPIO_PIN_RESET)
-  {
-    if ((HAL_GetTick() - start) > timeout_ms)
-    {
-      return HAL_TIMEOUT;
-    }
-  }
-
-  while (HAL_GPIO_ReadPin(DRDY_GPIO_Port, DRDY_Pin) == GPIO_PIN_SET)
-  {
-    if ((HAL_GetTick() - start) > timeout_ms)
-    {
-      return HAL_TIMEOUT;
-    }
-  }
-
-  return HAL_OK;
-}
-
 static void ADS1256_DelayUs(uint32_t us)
 {
   uint32_t i;
@@ -921,47 +1155,6 @@ static HAL_StatusTypeDef ADS1256_SetChannel(uint8_t pos_ch, uint8_t neg_ch)
 {
   uint8_t mux = ((pos_ch & 0x0FU) << 4) | (neg_ch & 0x0FU);
   return ADS1256_WriteReg(ADS1256_REG_MUX, mux);
-}
-
-static HAL_StatusTypeDef ADS1256_Read_ADC_CurrentRData(int32_t *adc_out)
-{
-  uint8_t buf[3];
-  HAL_StatusTypeDef st;
-  int32_t adc;
-
-  if (adc_out == NULL)
-  {
-    return HAL_ERROR;
-  }
-
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
-
-  buf[0] = ADS1256_CMD_RDATA;
-  st = HAL_SPI_Transmit(&hspi1, buf, 1, 100);
-  if (st != HAL_OK)
-  {
-    HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
-    return st;
-  }
-
-  ADS1256_DelayUs(ADS1256_DELAY_T6_US);
-  st = HAL_SPI_Receive(&hspi1, buf, 3, 100);
-
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
-  if (st != HAL_OK)
-  {
-    return st;
-  }
-
-  adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
-  if ((adc & 0x800000L) != 0)
-  {
-    adc -= 0x1000000L;
-  }
-
-  ADS1256_DelayUs(ADS1256_DELAY_DRDY_RECOVER_US);
-  *adc_out = adc;
-  return HAL_OK;
 }
 
 /**
@@ -1024,13 +1217,7 @@ static HAL_StatusTypeDef ADS1256_Init(void)
   if (st != HAL_OK) return st;
 
   /* 校准过程需要时间，阻塞等待 DRDY 变低表示校准完成 */
-  st = ADS1256_WaitDRDY(1000U);
-  if (st == HAL_OK)
-  {
-    g_rdata_last_pos = 0xFFU;
-    g_rdata_last_neg = 0xFFU;
-  }
-  return st;
+  return ADS1256_WaitDRDY(1000U);
 }
 
 /**
@@ -1039,51 +1226,64 @@ static HAL_StatusTypeDef ADS1256_Init(void)
   */
 static HAL_StatusTypeDef ADS1256_Read_ADC(uint8_t pos_ch, uint8_t neg_ch, int32_t *adc_out)
 {
+  uint8_t buf[3];
+  int32_t adc;
   HAL_StatusTypeDef st;
   const uint32_t drdy_timeout_ms = ADS1256_DrdyTimeoutMsByDrate(g_cfg_drate);
-  const uint8_t need_reprime = (uint8_t)((pos_ch != g_rdata_last_pos) || (neg_ch != g_rdata_last_neg));
 
   if (adc_out == NULL) return HAL_ERROR;
 
-  if (need_reprime != 0U)
+  /* 1. 切换多路复用器 */
+  st = ADS1256_SetChannel(pos_ch, neg_ch);
+  if (st != HAL_OK) return st;
+
+  /* 2. 重置数字滤波器：发送 SYNC 然后发送 WAKEUP */
+  st = ADS1256_SendCmd(ADS1256_CMD_SYNC);
+  if (st != HAL_OK) return st;
+
+  st = ADS1256_SendCmd(ADS1256_CMD_WAKEUP);
+  if (st != HAL_OK) return st;
+
+  /*
+   * 3. 核心机制：等待滤波器稳定 (Wait for t18)
+   *    发出 SYNC -> WAKEUP 后，ADS1256 的内部滤波器会重新开始采样。
+   *    此时等待 DRDY 引脚产生下降沿，就正好等效于渡过了 t18 滤波器建立时间。
+   *    这是获取多通道切换后“干净且完全建立”的数据的最规范做法。
+   */
+  st = ADS1256_WaitDRDY(drdy_timeout_ms);
+  if (st != HAL_OK) return st;
+
+  /* 4. 发送 RDATA 指令并读回 24 位数据 (整个过程 CS 保持拉低) */
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+
+  buf[0] = ADS1256_CMD_RDATA;
+  st = HAL_SPI_Transmit(&hspi1, buf, 1, 100);
+  if (st != HAL_OK) goto end;
+
+  /* 发送 RDATA 命令后，需等待 t6 才能读数据 */
+  ADS1256_DelayUs(ADS1256_DELAY_T6_US);
+
+  st = HAL_SPI_Receive(&hspi1, buf, 3, 100);
+
+end:
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
+  if (st != HAL_OK) return st;
+
+  /* 5. 数据拼接与符号扩展 (24-bit 补码) */
+  adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
+  if ((adc & 0x800000L) != 0)
   {
-    /* 1. 切换多路复用器 */
-    st = ADS1256_SetChannel(pos_ch, neg_ch);
-    if (st != HAL_OK) return st;
-
-    /* 2. 重置数字滤波器：发送 SYNC 然后发送 WAKEUP */
-    st = ADS1256_SendCmd(ADS1256_CMD_SYNC);
-    if (st != HAL_OK) return st;
-
-    st = ADS1256_SendCmd(ADS1256_CMD_WAKEUP);
-    if (st != HAL_OK) return st;
-
-    /*
-     * 3. 等待滤波器稳定 (Wait for t18)
-     *    使用 DRDY 下降沿，避免因为 DRDY 仍为低电平导致的重复读数。
-     */
-    st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
-    if (st != HAL_OK) return st;
-
-    g_rdata_last_pos = pos_ch;
-    g_rdata_last_neg = neg_ch;
-  }
-  else
-  {
-    st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
-    if (st != HAL_OK) return st;
+    adc -= 0x1000000L;
   }
 
-  return ADS1256_Read_ADC_CurrentRData(adc_out);
+  *adc_out = adc;
+  return HAL_OK;
 }
 
 static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *failed_ch)
 {
   uint8_t ch;
-  uint8_t i;
-  int32_t discarded_adc;
   const uint8_t scan_mask = g_scan_mask;
-  const uint8_t discard_count = ADS1256_ScanDiscardCountByDrate(g_cfg_drate);
   HAL_StatusTypeDef st;
 
   if (failed_ch != NULL)
@@ -1106,19 +1306,6 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *fai
     if ((scan_mask & (uint8_t)(1U << ch)) == 0U)
     {
       continue;
-    }
-
-    for (i = 0U; i < discard_count; i++)
-    {
-      st = ADS1256_Read_ADC(ch, ADS1256_AINCOM, &discarded_adc);
-      if (st != HAL_OK)
-      {
-        if (failed_ch != NULL)
-        {
-          *failed_ch = ch;
-        }
-        return st;
-      }
     }
 
     st = ADS1256_Read_ADC(ch, ADS1256_AINCOM, &g_scan_cache[ch]);
@@ -1167,7 +1354,7 @@ static HAL_StatusTypeDef ADS1256_StartContinuousMode(void)
   }
 
   /* 等待首个 DRDY 下降沿，确保后续读到的是有效转换结果。 */
-  return ADS1256_WaitDRDYEdge(drdy_timeout_ms);
+  return ADS1256_WaitDRDY(drdy_timeout_ms);
 }
 
 static HAL_StatusTypeDef ADS1256_StopContinuousMode(void)
@@ -1189,7 +1376,7 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Continuous(int32_t *adc_out)
   if (adc_out == NULL) return HAL_ERROR;
 
   /* 1. 监测 DRDY 下降沿 */
-  st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
+  st = ADS1256_WaitDRDY(drdy_timeout_ms);
   if (st != HAL_OK) return st;
 
   /* 2. DRDY 变低后，直接读出 24 位数据 */
@@ -1203,7 +1390,6 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Continuous(int32_t *adc_out)
   int32_t adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
   if (adc & 0x800000L) adc -= 0x1000000L;
 
-  ADS1256_DelayUs(ADS1256_DELAY_DRDY_RECOVER_US);
   *adc_out = adc;
   return HAL_OK;
 }
@@ -1253,7 +1439,7 @@ static HAL_StatusTypeDef ADS1256_RecoverContinuousStream(void)
     return st;
   }
 
-  st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
+  st = ADS1256_WaitDRDY(drdy_timeout_ms);
   return st;
 }
 
@@ -1290,17 +1476,37 @@ int __io_putchar(int ch)
   */
 int main(void)
 {
-  int32_t adc_val;
-  int32_t adc8[8];
+  int32_t adc_val = 0;
+  int32_t adc8[8] = {0};
   HAL_StatusTypeDef st;
 
+  /* USER CODE BEGIN 1 */
+
+  /* USER CODE END 1 */
+
+  /* MCU Configuration--------------------------------------------------------*/
+
+  /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
+
+  /* USER CODE BEGIN Init */
+
+  /* USER CODE END Init */
+
+  /* Configure the system clock */
   SystemClock_Config();
 
+  /* USER CODE BEGIN SysInit */
+
+  /* USER CODE END SysInit */
+
+  /* Initialize all configured peripherals */
   MX_GPIO_Init();
   MX_SPI1_Init();
   MX_USB_DEVICE_Init();
-
+  MX_USART2_UART_Init();
+  MX_USART6_UART_Init();
+  /* USER CODE BEGIN 2 */
   st = ADS1256_Init();
   if (st != HAL_OK)
   {
@@ -1313,8 +1519,17 @@ int main(void)
     ADS1256_PrintConfig();
   }
 
+  printf("CMD: RELAY <1|2|ALL> <ON|OFF>, RELAY ADDR <1..247>\r\n");
+
+  /* USER CODE END 2 */
+
+  /* Infinite loop */
+  /* USER CODE BEGIN WHILE */
   while (1)
   {
+    /* USER CODE END WHILE */
+
+    /* USER CODE BEGIN 3 */
     ADS1256_ProcessPendingCommand();
 
     if (g_acq_state == ADS1256_ACQ_STOP)
@@ -1436,6 +1651,7 @@ int main(void)
       HAL_Delay(10);
     }
   }
+  /* USER CODE END 3 */
 }
 
 /**
@@ -1447,9 +1663,14 @@ void SystemClock_Config(void)
   RCC_OscInitTypeDef RCC_OscInitStruct = {0};
   RCC_ClkInitTypeDef RCC_ClkInitStruct = {0};
 
+  /** Configure the main internal regulator output voltage
+  */
   __HAL_RCC_PWR_CLK_ENABLE();
   __HAL_PWR_VOLTAGESCALING_CONFIG(PWR_REGULATOR_VOLTAGE_SCALE2);
 
+  /** Initializes the RCC Oscillators according to the specified parameters
+  * in the RCC_OscInitTypeDef structure.
+  */
   RCC_OscInitStruct.OscillatorType = RCC_OSCILLATORTYPE_HSE;
   RCC_OscInitStruct.HSEState = RCC_HSE_ON;
   RCC_OscInitStruct.PLL.PLLState = RCC_PLL_ON;
@@ -1463,8 +1684,10 @@ void SystemClock_Config(void)
     Error_Handler();
   }
 
-  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK | RCC_CLOCKTYPE_SYSCLK |
-                                RCC_CLOCKTYPE_PCLK1 | RCC_CLOCKTYPE_PCLK2;
+  /** Initializes the CPU, AHB and APB buses clocks
+  */
+  RCC_ClkInitStruct.ClockType = RCC_CLOCKTYPE_HCLK|RCC_CLOCKTYPE_SYSCLK
+                              |RCC_CLOCKTYPE_PCLK1|RCC_CLOCKTYPE_PCLK2;
   RCC_ClkInitStruct.SYSCLKSource = RCC_SYSCLKSOURCE_PLLCLK;
   RCC_ClkInitStruct.AHBCLKDivider = RCC_SYSCLK_DIV1;
   RCC_ClkInitStruct.APB1CLKDivider = RCC_HCLK_DIV2;
@@ -1478,9 +1701,20 @@ void SystemClock_Config(void)
 
 /**
   * @brief SPI1 Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_SPI1_Init(void)
 {
+
+  /* USER CODE BEGIN SPI1_Init 0 */
+
+  /* USER CODE END SPI1_Init 0 */
+
+  /* USER CODE BEGIN SPI1_Init 1 */
+
+  /* USER CODE END SPI1_Init 1 */
+  /* SPI1 parameter configuration*/
   hspi1.Instance = SPI1;
   hspi1.Init.Mode = SPI_MODE_MASTER;
   hspi1.Init.Direction = SPI_DIRECTION_2LINES;
@@ -1493,44 +1727,124 @@ static void MX_SPI1_Init(void)
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
   hspi1.Init.CRCPolynomial = 10;
-
   if (HAL_SPI_Init(&hspi1) != HAL_OK)
   {
     Error_Handler();
   }
+  /* USER CODE BEGIN SPI1_Init 2 */
+
+  /* USER CODE END SPI1_Init 2 */
+
+}
+
+/**
+  * @brief USART2 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART2_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART2_Init 0 */
+
+  /* USER CODE END USART2_Init 0 */
+
+  /* USER CODE BEGIN USART2_Init 1 */
+
+  /* USER CODE END USART2_Init 1 */
+  huart2.Instance = USART2;
+  huart2.Init.BaudRate = 9600;
+  huart2.Init.WordLength = UART_WORDLENGTH_8B;
+  huart2.Init.StopBits = UART_STOPBITS_1;
+  huart2.Init.Parity = UART_PARITY_NONE;
+  huart2.Init.Mode = UART_MODE_TX_RX;
+  huart2.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart2.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart2) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART2_Init 2 */
+
+  /* USER CODE END USART2_Init 2 */
+
+}
+
+/**
+  * @brief USART6 Initialization Function
+  * @param None
+  * @retval None
+  */
+static void MX_USART6_UART_Init(void)
+{
+
+  /* USER CODE BEGIN USART6_Init 0 */
+
+  /* USER CODE END USART6_Init 0 */
+
+  /* USER CODE BEGIN USART6_Init 1 */
+
+  /* USER CODE END USART6_Init 1 */
+  huart6.Instance = USART6;
+  huart6.Init.BaudRate = 9600;
+  huart6.Init.WordLength = UART_WORDLENGTH_8B;
+  huart6.Init.StopBits = UART_STOPBITS_1;
+  huart6.Init.Parity = UART_PARITY_NONE;
+  huart6.Init.Mode = UART_MODE_TX_RX;
+  huart6.Init.HwFlowCtl = UART_HWCONTROL_NONE;
+  huart6.Init.OverSampling = UART_OVERSAMPLING_16;
+  if (HAL_UART_Init(&huart6) != HAL_OK)
+  {
+    Error_Handler();
+  }
+  /* USER CODE BEGIN USART6_Init 2 */
+
+  /* USER CODE END USART6_Init 2 */
+
 }
 
 /**
   * @brief GPIO Initialization Function
+  * @param None
+  * @retval None
   */
 static void MX_GPIO_Init(void)
 {
   GPIO_InitTypeDef GPIO_InitStruct = {0};
+  /* USER CODE BEGIN MX_GPIO_Init_1 */
 
-  ADS1256_EnableGPIOClock(CS_GPIO_Port);
-  ADS1256_EnableGPIOClock(DRDY_GPIO_Port);
-  ADS1256_EnableGPIOClock(RST_GPIO_Port); /* 启用硬件复位引脚时钟 */
+  /* USER CODE END MX_GPIO_Init_1 */
 
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
-  HAL_GPIO_WritePin(RST_GPIO_Port, RST_Pin, GPIO_PIN_SET);
+  /* GPIO Ports Clock Enable */
+  __HAL_RCC_GPIOH_CLK_ENABLE();
+  __HAL_RCC_GPIOA_CLK_ENABLE();
+  __HAL_RCC_GPIOB_CLK_ENABLE();
+  __HAL_RCC_GPIOC_CLK_ENABLE();
 
+  /*Configure GPIO pin Output Level */
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+
+  /*Configure GPIO pin : CS_Pin */
   GPIO_InitStruct.Pin = CS_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
   HAL_GPIO_Init(CS_GPIO_Port, &GPIO_InitStruct);
 
-  GPIO_InitStruct.Pin = RST_Pin;
-  GPIO_InitStruct.Mode = GPIO_MODE_OUTPUT_PP;
-  GPIO_InitStruct.Pull = GPIO_NOPULL;
-  GPIO_InitStruct.Speed = GPIO_SPEED_FREQ_LOW;
-  HAL_GPIO_Init(RST_GPIO_Port, &GPIO_InitStruct);
-
+  /*Configure GPIO pin : DRDY_Pin */
   GPIO_InitStruct.Pin = DRDY_Pin;
   GPIO_InitStruct.Mode = GPIO_MODE_INPUT;
-  GPIO_InitStruct.Pull = GPIO_PULLUP;
+  GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(DRDY_GPIO_Port, &GPIO_InitStruct);
+
+  /* USER CODE BEGIN MX_GPIO_Init_2 */
+
+  /* USER CODE END MX_GPIO_Init_2 */
 }
+
+/* USER CODE BEGIN 4 */
+
+/* USER CODE END 4 */
 
 /**
   * @brief  This function is executed in case of error occurrence.
@@ -1538,8 +1852,27 @@ static void MX_GPIO_Init(void)
   */
 void Error_Handler(void)
 {
+  /* USER CODE BEGIN Error_Handler_Debug */
+  /* User can add his own implementation to report the HAL error return state */
   __disable_irq();
   while (1)
   {
   }
+  /* USER CODE END Error_Handler_Debug */
 }
+#ifdef USE_FULL_ASSERT
+/**
+  * @brief  Reports the name of the source file and the source line number
+  *         where the assert_param error has occurred.
+  * @param  file: pointer to the source file name
+  * @param  line: assert_param error line source number
+  * @retval None
+  */
+void assert_failed(uint8_t *file, uint32_t line)
+{
+  /* USER CODE BEGIN 6 */
+  /* User can add his own implementation to report the file name and line number,
+     ex: printf("Wrong parameters value: file %s on line %d\r\n", file, line) */
+  /* USER CODE END 6 */
+}
+#endif /* USE_FULL_ASSERT */
