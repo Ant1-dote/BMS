@@ -4,16 +4,24 @@
 #include "loglistmodel.h"
 #include "scalarekf.h"
 
+#include <QFile>
+#include <QList>
 #include <QObject>
+#include <QPointF>
 #include <QPointer>
 #include <QRegularExpression>
 #include <QStringList>
 #include <QVector>
 
+#include <array>
+#include <deque>
 #include <utility>
 
-#include <QtSerialPort/qserialport.h>
 #include <QtCharts/QXYSeries>
+#include <QtSerialPort/qserialport.h>
+
+class QThread;
+class SampleSqlWriter;
 
 class ADS1256Controller : public QObject {
     Q_OBJECT
@@ -45,13 +53,16 @@ class ADS1256Controller : public QObject {
 
     Q_PROPERTY(double axisXMin READ axisXMin NOTIFY axisRangeChanged)
     Q_PROPERTY(double axisXMax READ axisXMax NOTIFY axisRangeChanged)
+    Q_PROPERTY(bool axisXInHours READ axisXInHours NOTIFY axisRangeChanged)
     Q_PROPERTY(double axisYMin READ axisYMin NOTIFY axisRangeChanged)
     Q_PROPERTY(double axisYMax READ axisYMax NOTIFY axisRangeChanged)
+    Q_PROPERTY(bool zoomActive READ zoomActive NOTIFY axisRangeChanged)
 
     Q_PROPERTY(QAbstractListModel *logModel READ logModel CONSTANT)
 
 public:
     explicit ADS1256Controller(QObject *parent = nullptr);
+    ~ADS1256Controller() override;
 
     QStringList availablePorts() const;
     bool connected() const;
@@ -80,8 +91,10 @@ public:
 
     double axisXMin() const;
     double axisXMax() const;
+    bool axisXInHours() const;
     double axisYMin() const;
     double axisYMax() const;
+    bool zoomActive() const;
 
     QAbstractListModel *logModel();
 
@@ -104,11 +117,19 @@ public:
     Q_INVOKABLE QString portDeviceAt(int index) const;
     Q_INVOKABLE void toggleConnection(const QString &device, int baud);
     Q_INVOKABLE void disconnectSerial();
+    Q_INVOKABLE void startCaptureWithDirectory(const QString &directoryPathOrUrl);
+    Q_INVOKABLE void startCapture();
+    Q_INVOKABLE void stopCapture(bool saveData);
     Q_INVOKABLE void toggleCapture();
 
     Q_INVOKABLE void sendCommand(const QString &command);
     Q_INVOKABLE void sendApplyConfig();
     Q_INVOKABLE void sendCustomCommand(const QString &command);
+    Q_INVOKABLE void openLogFileDialog();
+    Q_INVOKABLE void openDataFileDialog();
+    Q_INVOKABLE void openCaptureDirectoryDialog();
+    Q_INVOKABLE void loadLogFile(const QString &filePathOrUrl);
+    Q_INVOKABLE void loadDataFile(const QString &filePathOrUrl);
     Q_INVOKABLE void clearLogView();
     Q_INVOKABLE void clearLogStorage();
     Q_INVOKABLE void resetEkf();
@@ -126,6 +147,10 @@ public:
         QObject *ch7);
 
     Q_INVOKABLE void setScanChannelVisible(int channel, bool visible);
+    // Toggle whether a multi-channel lane participates in sampling (maps to CFG CHMASK).
+    Q_INVOKABLE bool setScanChannelSampling(int channel, bool enabled);
+    Q_INVOKABLE void setZoomRange(double xMin, double xMax, double yMin, double yMax);
+    Q_INVOKABLE void resetZoom();
 
 signals:
     void availablePortsChanged();
@@ -138,8 +163,27 @@ signals:
 
 private:
     void initializeDatabase();
+    QString defaultStorageDirectory() const;
+    bool configureStorageDirectory(const QString &directoryPath);
+    bool openCsvForSession();
+    void closeCsvFile();
+    bool appendSampleToCsv(const SampleEntry &sample, qint64 sampleTimestampNs);
+    bool appendScanFrameToCsv(const QVector<double> &voltages, qint64 sampleTimestampNs);
+    void enforcePendingSampleLimit();
+    void trimPlotBuffers();
+    void appendSingleOverview(double t, double rawVoltage, double filteredVoltage);
+    void appendScanOverview(double t, const QVector<double> &values);
+    void compactSingleOverview();
+    void compactScanOverview();
+    void clearZoomCache();
+    bool rebuildZoomCacheFromCsv();
     void appendLog(const QString &level, const QString &message, bool persist = true);
+    QString normalizeDbPath(const QString &filePathOrUrl) const;
+    bool rebuildPlotDataFromCsv(const QString &csvPath, QString *errorMessage = nullptr);
+    void rebuildPlotDataFromSamples(const QVector<SampleEntry> &samples);
     void resetStats();
+    bool persistPendingSamples();
+    bool flushSampleSqlBuffer(bool logError);
     void handleLine(const QString &line);
     void recordSingle(int adc, const QString &hexValue);
     void recordScan8(const QVector<int> &values);
@@ -154,8 +198,8 @@ private:
 
     void updatePlot(bool force = false);
     void clearSeries();
-    void updateAxisRange(double xMin, double xMax, double yMin, double yMax);
-    std::pair<double, double> xRange(const QVector<double> &x) const;
+    void updateAxisRange(double xMin, double xMax, double yMin, double yMax, bool forceNotify = false);
+    std::pair<double, double> xRange(const std::deque<double> &x) const;
 
     void onReadyRead();
     void onSerialError(QSerialPort::SerialPortError error);
@@ -163,6 +207,11 @@ private:
 private:
     QSerialPort *m_serial = nullptr;
     QByteArray m_rxBuffer;
+    bool m_rxOverflowWarned = false;
+    bool m_rxLineTooLongWarned = false;
+
+    QThread *m_sampleWriterThread = nullptr;
+    SampleSqlWriter *m_sampleWriter = nullptr;
 
     QStringList m_portLabels;
     QStringList m_portDevices;
@@ -183,7 +232,7 @@ private:
     int m_drate = 0x82;
     QString m_acqMode = QStringLiteral("SINGLE");
     int m_viewChannel = 0;
-    QString m_xAxisMode = QStringLiteral("FULL");
+    QString m_xAxisMode = QStringLiteral("WINDOW");
     double m_windowSeconds = 1800.0;
 
     bool m_ekfEnabled = false;
@@ -195,16 +244,25 @@ private:
 
     qint64 m_startNs = 0;
     qint64 m_lastPlotUpdateNs = 0;
+    double m_latestElapsedSeconds = 0.0;
 
     int m_plotBufferMax = 20000;
+    int m_singleOverviewStep = 1;
+    int m_scanOverviewStep = 1;
+    qint64 m_singleSampleSeq = 0;
+    qint64 m_scanFrameSeq = 0;
 
-    QVector<double> m_tSingle;
-    QVector<double> m_vSingle;
-    QVector<double> m_vSingleRaw;
+    std::deque<double> m_tSingle;
+    std::deque<double> m_vSingle;
+    std::deque<double> m_vSingleRaw;
 
-    QVector<double> m_tScan;
-    QVector<QVector<double>> m_vScan;
+    std::deque<double> m_tScan;
+    QVector<std::deque<double>> m_vScan;
     QVector<bool> m_scanVisible;
+    quint8 m_scanSampleMask = 0xFF;
+    std::array<int, 8> m_latestScanAdc {};
+    std::array<double, 8> m_latestScanVoltage {};
+    bool m_hasLatestScanFrame = false;
 
     QPointer<QXYSeries> m_singleShadowSeries;
     QPointer<QXYSeries> m_singleSeries;
@@ -212,11 +270,32 @@ private:
 
     double m_axisXMin = 0.0;
     double m_axisXMax = 1.0;
+    bool m_axisXInHours = false;
     double m_axisYMin = -0.01;
     double m_axisYMax = 0.01;
 
+    bool m_zoomActive = false;
+    double m_zoomXMin = 0.0;
+    double m_zoomXMax = 1.0;
+    double m_zoomYMin = -0.01;
+    double m_zoomYMax = 0.01;
+    bool m_zoomCacheReady = false;
+    QList<QPointF> m_zoomSingleRawPoints;
+    QList<QPointF> m_zoomSinglePoints;
+    QVector<QList<QPointF>> m_zoomScanPoints;
+
+    QString m_storageDir;
+    QString m_logDbPath;
+    QString m_csvPath;
+    QFile m_csvFile;
+    int m_csvFlushCounter = 0;
+    bool m_csvWriteHealthy = true;
+    bool m_sqlOverflowWarned = false;
+    int m_sqlFlushFailureStreak = 0;
+
     LogListModel m_logModel;
     LogDatabase m_logDatabase;
+    QVector<SampleEntry> m_pendingSamples;
 
     QRegularExpression m_adPattern;
     QRegularExpression m_ad8Pattern;

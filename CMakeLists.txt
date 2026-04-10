@@ -1,11 +1,20 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(BMS VERSION 0.1 LANGUAGES CXX)
+project(BMS VERSION 2.1.3 LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-find_package(Qt6 REQUIRED COMPONENTS Quick SerialPort Sql Charts)
+set(APP_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/bms_app.ico")
+set(APP_ICON_RESOURCE_WINDOWS "")
+set(APP_ICON_QRC "")
+
+if(WIN32 AND EXISTS "${APP_ICON_ICO}")
+    set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/app_icon.rc")
+    set(APP_ICON_QRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/icons.qrc")
+endif()
+
+find_package(Qt6 REQUIRED COMPONENTS Quick QuickDialogs2 SerialPort Sql Charts Widgets)
 
 qt_standard_project_setup(REQUIRES 6.10)
 
@@ -17,7 +26,13 @@ qt_add_executable(appBMS
     logdatabase.h
     loglistmodel.cpp
     loglistmodel.h
+    samplesqlwriter.cpp
+    samplesqlwriter.h
+    crashlogger.cpp
+    crashlogger.h
     scalarekf.h
+    ${APP_ICON_RESOURCE_WINDOWS}
+    ${APP_ICON_QRC}
 )
 
 qt_add_qml_module(appBMS
@@ -40,9 +55,11 @@ set_target_properties(appBMS PROPERTIES
 target_link_libraries(appBMS
     PRIVATE
         Qt6::Quick
+        Qt6::QuickDialogs2
         Qt6::SerialPort
         Qt6::Sql
         Qt6::Charts
+        Qt6::Widgets
 )
 
 install(TARGETS appBMS

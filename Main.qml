@@ -8,23 +8,75 @@ ApplicationWindow {
     width: 1440
     height: 920
     visible: true
-    title: "控制台"
-    color: "#f3f7fb"
+    title: "BMS CONSOLE"
+    color: "#f4f6fb"
+    font.family: "Segoe UI"
 
-    property color cWindowTop: "#f6f9fc"
-    property color cWindowMid: "#edf3f8"
-    property color cWindowBottom: "#e5edf5"
-    property color cPanel: "#f8fbff"
-    property color cPanelBorder: "#c9d8e8"
+    property color cWindowTop: "#f9fafc"
+    property color cWindowMid: "#f3f5f9"
+    property color cWindowBottom: "#eef2f8"
+    property color cPanel: "#fdfdff"
+    property color cPanelBorder: "#d8deea"
     property color cCard: "#ffffff"
-    property color cCardBorder: "#d4e1ef"
-    property color cTitle: "#304861"
-    property color cText: "#17324a"
-    property color cSubtle: "#6f859c"
-    property color cChartBg: "#f9fcff"
-    property color cGrid: "#d8e2ec"
-    property color cStatusBg: "#eaf2fb"
-    property color cStatusBorder: "#c3d5e8"
+    property color cCardBorder: "#e2e8f2"
+    property color cTitle: "#1f2a3a"
+    property color cText: "#263446"
+    property color cSubtle: "#6a788d"
+    property color cChartBg: "#ffffff"
+    property color cGrid: "#e6ebf3"
+    property color cStatusBg: "#f4f7fd"
+    property color cStatusBorder: "#d5deed"
+    property color cAccent: "#2563eb"
+    property color cBtnPrimary: "#2563eb"
+    property color cBtnPrimaryHover: "#1d4ed8"
+    property color cBtnPrimaryPressed: "#1e40af"
+    property color cBtnSecondary: "#f6f8fc"
+    property color cBtnSecondaryHover: "#edf2fb"
+    property color cBtnSecondaryPressed: "#e3eaf8"
+    property color cIndustrialHeader: "#f8fafe"
+    property color cIndustrialHeaderSoft: "#f1f5fb"
+    property color cIndustrialBorderStrong: "#d7dfec"
+    property color cIndustrialSurface: "#ffffff"
+    property color cIndustrialSurfaceLow: "#f6f9ff"
+    property color cIndustrialTextDim: "#5f6e84"
+    property int cSectionRadius: 10
+    property int cButtonRadius: 8
+    property int cControlH: 36
+    property int cPrimaryH: 38
+    property int cPanelGap: 14
+    property int cFormRowGap: 10
+    property int cFormColGap: 10
+    property int cLabelW: 78
+    property int cSectionOuterPad: 8
+    property int cSectionInnerPad: 10
+    property int cSectionContentPad: 10
+    property int cCollapseAnimMs: 180
+    property int cStartCaptureBtnW: 186
+    property int cSerialActionBtnW: 96
+    property int cStatusFieldW: 240
+    property int cApplyConfigBtnW: 220
+    property int cResetEkfBtnW: 200
+    property int cCmdButtonW: 156
+    property int cCmdSendButtonW: 116
+    property bool metricsPanelCollapsed: false
+    property int metricsPanelCollapsedHeight: 44
+    property int metricsPanelAnimMs: 180
+    property bool logPanelCollapsed: false
+    property int logPanelExpandedHeight: 260
+    property int logPanelCollapsedHeight: 48
+    property int logPanelAnimMs: 180
+
+    // 布局可调参数：手动改这里即可整体调整按钮和面板布局。
+    property int layoutLeftPanelPreferredWidth: 480
+    property int layoutLeftPanelMinimumWidth: 380
+    property int layoutSerialColumns: 3
+    property int layoutRuntimeColumns: 4
+    property int layoutEkfColumns: 4
+    property int layoutCommandColumns: 2
+    property int layoutScanVisibleColumns: 4
+    property int layoutMetricsBreakpoint: 900
+    property int layoutMetricsColumnsWide: 4
+    property int layoutMetricsColumnsNarrow: 2
 
     property var drateOptions: [
         { text: "30000 次/秒 (0xF0)", value: 0xF0 },
@@ -48,7 +100,42 @@ ApplicationWindow {
     property var channelNames: ["AIN0", "AIN1", "AIN2", "AIN3", "AIN4", "AIN5", "AIN6", "AIN7", "AINCOM"]
     property var pgaValues: [1, 2, 4, 8, 16, 32, 64]
     property var channelColors: ["#ff9e58", "#00c2a8", "#4ea1ff", "#f06b8f", "#f8bb39", "#9f7aea", "#5ec2ff", "#ff6b6b"]
+    property var scanSampleFlags: [true, true, true, true, true, true, true, true]
     property var scanVisibleFlags: [true, true, true, true, true, true, true, true]
+    property bool multiMode: controller.acqMode !== "SINGLE"
+    property bool stopDisconnectAfterSave: false
+    property int captureElapsedSeconds: 0
+    property double captureStartEpochMs: 0
+    function openStopDialog(disconnectAfterStop) {
+        stopDisconnectAfterSave = disconnectAfterStop
+        stopConfirmDialog.open()
+    }
+
+    function finishStopFlow(saveData) {
+        controller.stopCapture(saveData)
+        if (stopDisconnectAfterSave && controller.connected) {
+            controller.disconnectSerial()
+        }
+        stopDisconnectAfterSave = false
+    }
+
+    function formatDuration(totalSeconds) {
+        const seconds = Math.max(0, Math.floor(totalSeconds))
+        const hh = Math.floor(seconds / 3600)
+        const mm = Math.floor((seconds % 3600) / 60)
+        const ss = seconds % 60
+        return String(hh).padStart(2, "0")
+            + ":" + String(mm).padStart(2, "0")
+            + ":" + String(ss).padStart(2, "0")
+    }
+
+    function refreshCaptureElapsed() {
+        if (!controller.acquisitionEnabled || captureStartEpochMs <= 0) {
+            captureElapsedSeconds = 0
+            return
+        }
+        captureElapsedSeconds = Math.floor((Date.now() - captureStartEpochMs) / 1000)
+    }
 
     function levelColor(level) {
         if (level === "ok") {
@@ -104,101 +191,711 @@ ApplicationWindow {
         }
     }
 
+    component SectionCard: GroupBox {
+        id: sectionCard
+        property bool collapsed: false
+        property int headerHeight: 34
+        Layout.fillWidth: true
+        Layout.preferredHeight: sectionCard.collapsed
+                                ? sectionCard.headerHeight + 8
+                                : implicitHeight + root.cSectionContentPad
+        Layout.maximumHeight: sectionCard.collapsed ? sectionCard.headerHeight + 8 : 16777215
+        Layout.leftMargin: root.cSectionOuterPad
+        Layout.rightMargin: root.cSectionOuterPad
+        padding: sectionCard.collapsed ? 6 : 14
+        topPadding: sectionCard.collapsed ? sectionCard.headerHeight + 2 : 42
+        font.pixelSize: 14
+        font.bold: false
+        clip: sectionCard.collapsed
+
+        label: RowLayout {
+            x: 8
+            y: 8
+            width: sectionCard.width - 16
+            height: 20
+            spacing: 8
+
+            ToolButton {
+                text: "⌄"
+                implicitWidth: 18
+                implicitHeight: 18
+                padding: 0
+                onClicked: sectionCard.collapsed = !sectionCard.collapsed
+
+                contentItem: Label {
+                    text: parent.text
+                    horizontalAlignment: Text.AlignHCenter
+                    verticalAlignment: Text.AlignVCenter
+                    color: root.cSubtle
+                    font.pixelSize: 12
+                    font.bold: false
+                    rotation: sectionCard.collapsed ? -90 : 0
+
+                    Behavior on rotation {
+                        NumberAnimation {
+                            duration: root.cCollapseAnimMs
+                            easing.type: Easing.InOutCubic
+                        }
+                    }
+                }
+
+                background: Rectangle {
+                    radius: 5
+                    color: parent.down ? "#dde6f6" : (parent.hovered ? "#eaf0fb" : "#f5f8ff")
+                    border.color: "#d1daea"
+                    border.width: 1
+                }
+            }
+
+            Label {
+                text: sectionCard.title
+                color: root.cTitle
+                font.pixelSize: 13
+                font.bold: true
+                font.family: "Segoe UI"
+                font.letterSpacing: 0.2
+            }
+
+            Item { Layout.fillWidth: true }
+        }
+
+        background: Rectangle {
+            radius: root.cSectionRadius
+            color: root.cCard
+            border.color: sectionCard.collapsed ? "transparent" : root.cIndustrialBorderStrong
+            border.width: sectionCard.collapsed ? 0 : 1
+
+            Rectangle {
+                visible: !sectionCard.collapsed
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                anchors.margins: 1
+                anchors.topMargin: sectionCard.headerHeight
+                color: root.cIndustrialSurface
+
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: "#ffffff" }
+                    GradientStop { position: 1.0; color: root.cIndustrialSurface }
+                }
+            }
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 1
+                height: sectionCard.headerHeight - 1
+                radius: root.cSectionRadius - 1
+                gradient: Gradient {
+                    GradientStop { position: 0.0; color: root.cIndustrialHeaderSoft }
+                    GradientStop { position: 1.0; color: root.cIndustrialHeader }
+                }
+                border.color: "#dce4f0"
+                border.width: 1
+            }
+
+            Rectangle {
+                visible: !sectionCard.collapsed
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.topMargin: sectionCard.headerHeight - 2
+                height: 1
+                color: "#dfe6f2"
+                opacity: 0.7
+            }
+        }
+    }
+
+    component FormLabel: Label {
+        Layout.preferredWidth: root.cLabelW
+        Layout.preferredHeight: root.cControlH
+        Layout.alignment: Qt.AlignVCenter
+        horizontalAlignment: Text.AlignLeft
+        verticalAlignment: Text.AlignVCenter
+        color: root.cIndustrialTextDim
+        font.pixelSize: 13
+        font.bold: false
+    }
+
+    component StatusChip: Rectangle {
+        required property string label
+        required property string value
+        required property color valueColor
+
+        radius: 8
+        color: root.cIndustrialSurfaceLow
+        border.color: root.cIndustrialBorderStrong
+        border.width: 1
+        implicitHeight: 54
+
+        ColumnLayout {
+            anchors.fill: parent
+            anchors.margins: 8
+            spacing: 2
+
+            Label {
+                text: parent.parent.label
+                color: root.cIndustrialTextDim
+                font.pixelSize: 11
+                font.bold: false
+            }
+
+            Label {
+                text: parent.parent.value
+                color: parent.parent.valueColor
+                font.pixelSize: 13
+                font.bold: true
+            }
+        }
+    }
+
+    component PrimaryActionButton: Button {
+        implicitHeight: root.cPrimaryH
+        font.pixelSize: 13
+        font.bold: false
+        Layout.alignment: Qt.AlignVCenter
+        property color toneNormal: root.cBtnPrimary
+        property color toneHover: root.cBtnPrimaryHover
+        property color tonePressed: root.cBtnPrimaryPressed
+        property color toneBorder: "#1f4fbe"
+
+        contentItem: Label {
+            text: parent.text
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            color: "#ffffff"
+            font.pixelSize: parent.font.pixelSize
+            font.bold: parent.font.bold
+        }
+
+        background: Rectangle {
+            radius: root.cButtonRadius
+            color: parent.down
+                 ? parent.tonePressed
+                 : (parent.hovered ? parent.toneHover : parent.toneNormal)
+             border.color: parent.toneBorder
+            border.width: 1
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.right: parent.right
+                anchors.top: parent.top
+                anchors.margins: 1
+                height: 1
+                color: "#ffffff"
+                opacity: 0.18
+            }
+        }
+    }
+
+    component SecondaryActionButton: Button {
+        implicitHeight: root.cControlH
+        font.pixelSize: 12
+        Layout.alignment: Qt.AlignVCenter
+
+        contentItem: Label {
+            text: parent.text
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            color: root.cText
+            font.pixelSize: parent.font.pixelSize
+            font.bold: parent.font.bold
+        }
+
+        background: Rectangle {
+            radius: root.cButtonRadius
+            color: parent.down
+                   ? root.cBtnSecondaryPressed
+                   : (parent.hovered ? root.cBtnSecondaryHover : root.cBtnSecondary)
+            border.color: "#d3dceb"
+            border.width: 1
+        }
+    }
+
+    component FluentToolButton: ToolButton {
+        implicitHeight: 30
+        implicitWidth: 66
+        font.pixelSize: 12
+
+        contentItem: Label {
+            text: parent.text
+            horizontalAlignment: Text.AlignHCenter
+            verticalAlignment: Text.AlignVCenter
+            color: root.cText
+            font.pixelSize: parent.font.pixelSize
+        }
+
+        background: Rectangle {
+            radius: 8
+            color: parent.down
+                   ? root.cBtnSecondaryPressed
+                   : (parent.hovered ? root.cBtnSecondaryHover : root.cBtnSecondary)
+            border.color: "#d3dceb"
+            border.width: 1
+        }
+    }
+
+    component FluentTextField: TextField {
+        implicitHeight: root.cControlH
+        font.pixelSize: 12
+        color: root.cText
+        selectByMouse: true
+        padding: 9
+
+        background: Rectangle {
+            radius: root.cButtonRadius
+            color: parent.enabled ? "#ffffff" : "#f2f4f8"
+            border.color: parent.activeFocus ? root.cAccent : "#d3dceb"
+            border.width: parent.activeFocus ? 2 : 1
+        }
+    }
+
+    component FluentComboBox: ComboBox {
+        id: fluentCombo
+        implicitHeight: root.cControlH
+        font.pixelSize: 12
+        leftPadding: 10
+        rightPadding: 30
+
+        contentItem: Text {
+            text: fluentCombo.displayText
+            color: fluentCombo.enabled ? root.cText : "#95a1b4"
+            font.pixelSize: fluentCombo.font.pixelSize
+            elide: Text.ElideRight
+            verticalAlignment: Text.AlignVCenter
+        }
+
+        indicator: Canvas {
+            x: fluentCombo.width - width - 10
+            y: (fluentCombo.height - height) / 2
+            width: 10
+            height: 6
+            contextType: "2d"
+
+            onPaint: {
+                context.reset()
+                context.moveTo(0, 0)
+                context.lineTo(width / 2, height)
+                context.lineTo(width, 0)
+                context.lineWidth = 1.8
+                context.strokeStyle = root.cSubtle
+                context.stroke()
+            }
+        }
+
+        background: Rectangle {
+            radius: root.cButtonRadius
+            color: fluentCombo.down
+                   ? root.cBtnSecondaryPressed
+                   : (fluentCombo.hovered ? root.cBtnSecondaryHover : "#ffffff")
+            border.color: fluentCombo.visualFocus ? root.cAccent : "#d3dceb"
+            border.width: fluentCombo.visualFocus ? 2 : 1
+        }
+    }
+
+    component FluentSpinBox: SpinBox {
+        id: fluentSpin
+        implicitHeight: root.cControlH
+        font.pixelSize: 12
+
+        up.indicator: Rectangle {
+            x: fluentSpin.width - width - 1
+            y: 1
+            width: 24
+            height: (fluentSpin.height / 2) - 1
+            radius: 4
+            color: fluentSpin.up.pressed ? root.cBtnSecondaryPressed : (fluentSpin.up.hovered ? root.cBtnSecondaryHover : "#f8faff")
+            border.color: "#d3dceb"
+
+            Text {
+                anchors.centerIn: parent
+                text: "+"
+                color: root.cSubtle
+                font.pixelSize: 11
+            }
+        }
+
+        down.indicator: Rectangle {
+            x: fluentSpin.width - width - 1
+            y: fluentSpin.height - height - 1
+            width: 24
+            height: (fluentSpin.height / 2) - 1
+            radius: 4
+            color: fluentSpin.down.pressed ? root.cBtnSecondaryPressed : (fluentSpin.down.hovered ? root.cBtnSecondaryHover : "#f8faff")
+            border.color: "#d3dceb"
+
+            Text {
+                anchors.centerIn: parent
+                text: "-"
+                color: root.cSubtle
+                font.pixelSize: 11
+            }
+        }
+
+        background: Rectangle {
+            radius: root.cButtonRadius
+            color: fluentSpin.enabled ? "#ffffff" : "#f2f4f8"
+            border.color: fluentSpin.visualFocus ? root.cAccent : "#d3dceb"
+            border.width: fluentSpin.visualFocus ? 2 : 1
+        }
+    }
+
+    component FluentCheckBox: CheckBox {
+        id: fluentCheck
+        spacing: 8
+        font.pixelSize: 12
+
+        indicator: Rectangle {
+            implicitWidth: 18
+            implicitHeight: 18
+            radius: 4
+            color: fluentCheck.checked ? root.cAccent : "#ffffff"
+            border.color: fluentCheck.checked ? root.cAccent : "#cfd8e9"
+            border.width: 1
+
+            Label {
+                anchors.centerIn: parent
+                text: "✓"
+                visible: fluentCheck.checked
+                color: "#ffffff"
+                font.pixelSize: 12
+                font.bold: true
+            }
+        }
+
+        contentItem: Text {
+            text: fluentCheck.text
+            leftPadding: fluentCheck.indicator.width + fluentCheck.spacing
+            verticalAlignment: Text.AlignVCenter
+            color: root.cText
+            font.pixelSize: fluentCheck.font.pixelSize
+        }
+    }
+
+    Timer {
+        id: captureElapsedTimer
+        interval: 1000
+        repeat: true
+        running: false
+        onTriggered: root.refreshCaptureElapsed()
+    }
+
+    Connections {
+        target: controller
+
+        function onAcquisitionEnabledChanged() {
+            if (controller.acquisitionEnabled) {
+                root.captureStartEpochMs = Date.now()
+                root.captureElapsedSeconds = 0
+                captureElapsedTimer.start()
+                return
+            }
+
+            captureElapsedTimer.stop()
+            root.captureStartEpochMs = 0
+            root.captureElapsedSeconds = 0
+        }
+    }
+
+    Component.onCompleted: {
+        if (controller.acquisitionEnabled) {
+            captureStartEpochMs = Date.now()
+            captureElapsedSeconds = 0
+            captureElapsedTimer.start()
+        }
+    }
+
+    Rectangle {
+        id: topBar
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.top: parent.top
+        anchors.margins: 16
+        height: 70
+        radius: 14
+        gradient: Gradient {
+            GradientStop { position: 0.0; color: "#ffffff" }
+            GradientStop { position: 1.0; color: "#f5f8fe" }
+        }
+        border.color: root.cCardBorder
+        border.width: 1
+
+        RowLayout {
+            anchors.fill: parent
+            anchors.margins: 10
+            spacing: 10
+
+            Label {
+                text: "控制台"
+                color: root.cTitle
+                font.pixelSize: 22
+                font.bold: true
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 1
+                Layout.fillHeight: true
+                color: "#e3e8f1"
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                implicitHeight: 34
+                radius: 8
+                color: "#eef3fe"
+                border.color: "#d6e0f5"
+
+                Label {
+                    anchors.centerIn: parent
+                    text: controller.statusText
+                    color: root.cText
+                    font.pixelSize: 13
+                    elide: Label.ElideRight
+                }
+            }
+
+            Rectangle {
+                Layout.preferredWidth: 156
+                implicitHeight: 34
+                radius: 8
+                color: "#eef3fe"
+                border.color: "#d6e0f5"
+
+                RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: 10
+                    anchors.rightMargin: 10
+                    spacing: 8
+
+                    Label {
+                        text: "运行时间"
+                        color: root.cSubtle
+                        font.pixelSize: 12
+                    }
+
+                    Item { Layout.fillWidth: true }
+
+                    Label {
+                        text: root.formatDuration(root.captureElapsedSeconds)
+                        color: root.cTitle
+                        font.pixelSize: 13
+                        font.family: "Consolas"
+                        font.bold: true
+                    }
+                }
+            }
+        }
+    }
+
     SplitView {
-        anchors.fill: parent
+        anchors.left: parent.left
+        anchors.right: parent.right
+        anchors.bottom: parent.bottom
+        anchors.top: topBar.bottom
         anchors.margins: 16
         orientation: Qt.Horizontal
 
         ScrollView {
             id: leftPanelScroll
-            SplitView.preferredWidth: 420
-            SplitView.minimumWidth: 340
+            SplitView.preferredWidth: root.layoutLeftPanelPreferredWidth
+            SplitView.minimumWidth: root.layoutLeftPanelMinimumWidth
             clip: true
+            ScrollBar.vertical.policy: ScrollBar.AsNeeded
+            leftPadding: root.cSectionOuterPad + 6
+            rightPadding: root.cSectionOuterPad + 6
+            topPadding: 10
+            bottomPadding: 14
 
             ColumnLayout {
                 width: leftPanelScroll.availableWidth
-                spacing: 10
+                spacing: root.cPanelGap
 
                 Rectangle {
                     Layout.fillWidth: true
-                    radius: 12
-                    color: "#d8e9fb"
-                    border.color: "#b4cce5"
+                    Layout.leftMargin: root.cSectionOuterPad
+                    Layout.rightMargin: root.cSectionOuterPad
+                    implicitHeight: 96
+                    radius: root.cSectionRadius
+                    gradient: Gradient {
+                        GradientStop { position: 0.0; color: "#ffffff" }
+                        GradientStop { position: 1.0; color: "#f5f8fe" }
+                    }
+                    border.color: root.cIndustrialBorderStrong
                     border.width: 1
-                    implicitHeight: 88
 
-                    Column {
+                    ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 12
-                        spacing: 4
+                        anchors.margins: 10
+                        spacing: 8
 
-                        Label {
-                            text: "^_^"
-                            font.pixelSize: 24
-                            color: "#24425f"
-                            font.bold: true
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Label {
+                                text: "工控操作面板"
+                                color: root.cTitle
+                                font.pixelSize: 14
+                                font.bold: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Rectangle {
+                                radius: 4
+                                color: root.multiMode ? "#e6f8f1" : "#edf2fb"
+                                border.color: root.multiMode ? "#b5e3d1" : "#cad9ee"
+                                border.width: 1
+                                implicitWidth: 78
+                                implicitHeight: 22
+
+                                Label {
+                                    anchors.centerIn: parent
+                                    text: root.multiMode ? "MULTI" : "SINGLE"
+                                    color: root.multiMode ? "#0e8e66" : "#48607a"
+                                    font.pixelSize: 11
+                                    font.bold: false
+                                }
+                            }
                         }
-                        Label {
-                            text: "控制中心"
-                            color: "#4c6985"
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "通讯"
+                                value: controller.connected ? "在线" : "离线"
+                                valueColor: controller.connected ? "#0f8a67" : "#a95a4a"
+                            }
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "采样"
+                                value: controller.acquisitionEnabled ? "运行中" : "已停止"
+                                valueColor: controller.acquisitionEnabled ? "#0f8a67" : "#6c7f93"
+                            }
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "窗口"
+                                value: controller.xAxisMode
+                                valueColor: "#3a5d80"
+                            }
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "串口连接"
-                    Layout.fillWidth: true
+                SectionCard {
+                    id: serialSection
+                    title: "01 串口连接"
 
                     GridLayout {
-                        anchors.fill: parent
-                        columns: 3
-                        rowSpacing: 8
-                        columnSpacing: 8
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !serialSection.collapsed
+                        opacity: serialSection.collapsed ? 0.0 : 1.0
+                        height: serialSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        columns: root.layoutSerialColumns
+                        rowSpacing: root.cFormRowGap
+                        columnSpacing: root.cFormColGap
 
-                        Label { text: "端口" }
-                        ComboBox {
-                            id: portCombo
-                            Layout.fillWidth: true
-                            model: controller.availablePorts
-                        }
-                        Button {
-                            text: "刷新端口"
-                            onClicked: controller.refreshPorts()
-                        }
-
-                        Label { text: "波特率" }
-                        ComboBox {
-                            id: baudCombo
-                            Layout.fillWidth: true
-                            model: [9600, 57600, 115200, 230400, 460800, 921600]
-                            currentIndex: 2
-                        }
-                        Button {
-                            text: controller.connected ? "断开" : "连接"
-                            onClicked: {
-                                let dev = controller.portDeviceAt(portCombo.currentIndex)
-                                controller.toggleConnection(dev, Number(baudCombo.currentText))
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
                             }
                         }
 
-                        Label { text: "采样" }
-                        Button {
-                            Layout.columnSpan: 2
-                            text: controller.acquisitionEnabled ? "停止连续采样" : "开始连续采样"
-                            onClicked: controller.toggleCapture()
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
                         }
 
-                        Label { text: "状态" }
+                        FormLabel { text: "端口" }
+                        FluentComboBox {
+                            id: portCombo
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            model: controller.availablePorts
+                        }
+                        SecondaryActionButton {
+                            text: "刷新端口"
+                            Layout.preferredHeight: root.cControlH
+                            Layout.preferredWidth: root.cSerialActionBtnW
+                            onClicked: controller.refreshPorts()
+                        }
+
+                        FormLabel { text: "波特率" }
+                        FluentComboBox {
+                            id: baudCombo
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            model: [9600, 57600, 115200, 230400, 460800, 921600]
+                            currentIndex: 2
+                        }
+                        SecondaryActionButton {
+                            text: controller.connected ? "断开" : "连接"
+                            Layout.preferredHeight: root.cControlH
+                            Layout.preferredWidth: root.cSerialActionBtnW
+                            onClicked: {
+                                if (controller.connected) {
+                                    if (controller.acquisitionEnabled) {
+                                        root.openStopDialog(true)
+                                    } else {
+                                        controller.disconnectSerial()
+                                    }
+                                } else {
+                                    let dev = controller.portDeviceAt(portCombo.currentIndex)
+                                    controller.toggleConnection(dev, Number(baudCombo.currentText))
+                                }
+                            }
+                        }
+
+                        FormLabel { text: "采样" }
+                        PrimaryActionButton {
+                            Layout.columnSpan: 2
+                            Layout.preferredHeight: root.cPrimaryH
+                            Layout.preferredWidth: root.cStartCaptureBtnW
+                            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                            toneNormal: controller.acquisitionEnabled ? "#da6d56" : "#0f9f7a"
+                            toneHover: controller.acquisitionEnabled ? "#c95d48" : "#0d916f"
+                            tonePressed: controller.acquisitionEnabled ? "#b84f3c" : "#0b7f61"
+                            toneBorder: controller.acquisitionEnabled ? "#a64636" : "#0a7056"
+                            text: controller.acquisitionEnabled ? "停止连续采样" : "开始连续采样"
+                            onClicked: {
+                                if (controller.acquisitionEnabled) {
+                                    root.openStopDialog(false)
+                                } else {
+                                    controller.openCaptureDirectoryDialog()
+                                }
+                            }
+                        }
+
+                        FormLabel { text: "状态" }
                         Rectangle {
                             Layout.columnSpan: 2
-                            Layout.fillWidth: true
-                            implicitHeight: 34
+                            Layout.preferredWidth: root.cStatusFieldW
+                            Layout.alignment: Qt.AlignHCenter
+                            Layout.bottomMargin: root.cSectionContentPad
+                            implicitHeight: root.cControlH
                             color: root.cStatusBg
                             radius: 8
                             border.color: root.cStatusBorder
 
                             Label {
                                 anchors.centerIn: parent
+                                anchors.verticalCenterOffset: -2
                                 text: controller.statusText
                                 color: root.cText
                             }
@@ -206,20 +903,45 @@ ApplicationWindow {
                     }
                 }
 
-                GroupBox {
-                    title: "运行配置"
-                    Layout.fillWidth: true
+                Item { Layout.preferredHeight: 4 }
+
+                SectionCard {
+                    id: runtimeSection
+                    title: "02 运行配置"
 
                     GridLayout {
-                        anchors.fill: parent
-                        columns: 4
-                        rowSpacing: 8
-                        columnSpacing: 8
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !runtimeSection.collapsed
+                        opacity: runtimeSection.collapsed ? 0.0 : 1.0
+                        height: runtimeSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        columns: root.layoutRuntimeColumns
+                        rowSpacing: root.cFormRowGap
+                        columnSpacing: root.cFormColGap
 
-                        Label { text: "参考电压" }
-                        SpinBox {
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
+                            }
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
+
+                        FormLabel { text: "参考电压" }
+                        FluentSpinBox {
                             id: vrefSpin
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             from: 100
                             to: 5000
                             stepSize: 50
@@ -230,10 +952,12 @@ ApplicationWindow {
                             onValueModified: controller.vref = value / 1000.0
                         }
 
-                        Label { text: "PGA" }
-                        ComboBox {
+                        FormLabel { text: "PGA" }
+                        FluentComboBox {
                             id: pgaCombo
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             model: pgaValues
                             onActivated: controller.pga = Number(currentText)
                             Component.onCompleted: {
@@ -242,31 +966,37 @@ ApplicationWindow {
                             }
                         }
 
-                        Label { text: "AINP" }
-                        ComboBox {
+                        FormLabel { text: "AINP" }
+                        FluentComboBox {
                             id: pselCombo
                             Layout.fillWidth: true
-                            enabled: controller.acqMode !== "SCAN8"
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !root.multiMode
                             model: channelNames
                             onActivated: controller.psel = currentText
                             Component.onCompleted: currentIndex = channelNames.indexOf(controller.psel)
                         }
 
-                        Label { text: "AINN" }
-                        ComboBox {
+                        FormLabel { text: "AINN" }
+                        FluentComboBox {
                             id: nselCombo
                             Layout.fillWidth: true
-                            enabled: controller.acqMode !== "SCAN8"
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            enabled: !root.multiMode
                             model: channelNames
                             onActivated: controller.nsel = currentText
                             Component.onCompleted: currentIndex = channelNames.indexOf(controller.nsel)
                         }
 
-                        Label { text: "采样率" }
-                        ComboBox {
+                        FormLabel { text: "采样率" }
+                        FluentComboBox {
                             id: drateCombo
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
                             Layout.columnSpan: 3
+                            Layout.alignment: Qt.AlignVCenter
                             model: drateOptions
                             textRole: "text"
                             onActivated: controller.drate = drateOptions[currentIndex].value
@@ -280,37 +1010,60 @@ ApplicationWindow {
                             }
                         }
 
-                        Label { text: "采样模式" }
-                        ComboBox {
+                        FormLabel { text: "采样模式" }
+                        FluentComboBox {
                             id: acqModeCombo
                             Layout.fillWidth: true
-                            model: ["SINGLE", "SCAN8"]
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
+                            model: ["SINGLE", "MULTI"]
                             onActivated: controller.acqMode = currentText
-                            Component.onCompleted: currentIndex = model.indexOf(controller.acqMode)
+                            Component.onCompleted: currentIndex = root.multiMode ? 1 : 0
+
+                            Connections {
+                                target: controller
+                                function onConfigChanged() {
+                                    acqModeCombo.currentIndex = root.multiMode ? 1 : 0
+                                }
+                            }
                         }
 
-                        Label { text: "显示通道" }
-                        ComboBox {
+                        FormLabel { text: "显示通道" }
+                        FluentComboBox {
+                            id: viewChannelCombo
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             model: ["AIN0", "AIN1", "AIN2", "AIN3", "AIN4", "AIN5", "AIN6", "AIN7"]
-                            enabled: controller.acqMode === "SCAN8"
+                            enabled: root.multiMode
                             onActivated: controller.viewChannel = currentIndex
                             Component.onCompleted: currentIndex = controller.viewChannel
+
+                            Connections {
+                                target: controller
+                                function onConfigChanged() {
+                                    viewChannelCombo.currentIndex = controller.viewChannel
+                                }
+                            }
                         }
 
-                        Label { text: "横轴模式" }
-                        ComboBox {
+                        FormLabel { text: "横轴模式" }
+                        FluentComboBox {
                             id: xAxisModeCombo
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             model: ["FULL", "WINDOW"]
                             onActivated: controller.xAxisMode = currentText
                             Component.onCompleted: currentIndex = model.indexOf(controller.xAxisMode)
                         }
 
-                        Label { text: "滑窗秒数" }
-                        SpinBox {
+                        FormLabel { text: "滑窗秒数" }
+                        FluentSpinBox {
                             id: windowSpin
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             enabled: controller.xAxisMode === "WINDOW"
                             from: 2
                             to: 21600
@@ -319,90 +1072,176 @@ ApplicationWindow {
                         }
 
                         Item { Layout.fillWidth: true }
-                        Button {
+                        PrimaryActionButton {
                             Layout.columnSpan: 3
+                            Layout.preferredHeight: root.cPrimaryH
+                            Layout.preferredWidth: root.cApplyConfigBtnW
+                            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                            Layout.bottomMargin: root.cSectionContentPad
+                            toneNormal: "#2f6df5"
+                            toneHover: "#285fdd"
+                            tonePressed: "#224fc0"
+                            toneBorder: "#1f48ae"
                             text: "下发配置到设备"
                             onClicked: controller.sendApplyConfig()
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "滤波 (EKF)"
-                    Layout.fillWidth: true
+                SectionCard {
+                    id: ekfSection
+                    title: "03 滤波 (EKF)"
 
                     GridLayout {
-                        anchors.fill: parent
-                        columns: 4
-                        rowSpacing: 8
-                        columnSpacing: 8
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !ekfSection.collapsed
+                        opacity: ekfSection.collapsed ? 0.0 : 1.0
+                        height: ekfSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        columns: root.layoutEkfColumns
+                        rowSpacing: root.cFormRowGap
+                        columnSpacing: root.cFormColGap
 
-                        CheckBox {
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
+                            }
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
+
+                        FluentCheckBox {
                             Layout.columnSpan: 4
                             text: "启用 EKF"
                             checked: controller.ekfEnabled
                             onToggled: controller.ekfEnabled = checked
                         }
 
-                        Label { text: "Q" }
-                        TextField {
+                        FormLabel { text: "Q" }
+                        FluentTextField {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             text: Number(controller.ekfQ).toExponential(3)
                             onEditingFinished: controller.ekfQ = Number(text)
                         }
 
-                        Label { text: "R" }
-                        TextField {
+                        FormLabel { text: "R" }
+                        FluentTextField {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             text: Number(controller.ekfR).toExponential(3)
                             onEditingFinished: controller.ekfR = Number(text)
                         }
 
-                        Label { text: "P0" }
-                        TextField {
+                        FormLabel { text: "P0" }
+                        FluentTextField {
                             Layout.fillWidth: true
+                            Layout.preferredHeight: root.cControlH
+                            Layout.alignment: Qt.AlignVCenter
                             text: controller.ekfP0.toString()
                             onEditingFinished: controller.ekfP0 = Number(text)
                         }
 
                         Item { Layout.fillWidth: true }
-                        Button {
+                        SecondaryActionButton {
                             Layout.columnSpan: 2
+                            Layout.preferredHeight: root.cControlH
+                            Layout.preferredWidth: root.cResetEkfBtnW
+                            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                            Layout.bottomMargin: root.cSectionContentPad
                             text: "重置滤波状态"
                             onClicked: controller.resetEkf()
                         }
                     }
                 }
 
-                GroupBox {
-                    title: "高级命令"
-                    Layout.fillWidth: true
+                SectionCard {
+                    id: commandSection
+                    title: "04 高级命令"
 
                     ColumnLayout {
-                        anchors.fill: parent
-                        spacing: 8
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !commandSection.collapsed
+                        opacity: commandSection.collapsed ? 0.0 : 1.0
+                        height: commandSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        spacing: root.cFormRowGap
+
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
+                            }
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
 
                         GridLayout {
                             Layout.fillWidth: true
-                            columns: 2
-                            rowSpacing: 8
-                            columnSpacing: 8
+                            Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                            columns: root.layoutCommandColumns
+                            rowSpacing: root.cFormRowGap
+                            columnSpacing: root.cFormColGap
 
-                            Button { text: "复位 RESET"; onClicked: controller.sendCommand("RESET") }
-                            Button { text: "自校准 SELFCAL"; onClicked: controller.sendCommand("SELFCAL") }
-                            Button { text: "同步 SYNC"; onClicked: controller.sendCommand("SYNC") }
-                            Button { text: "唤醒 WAKEUP"; onClicked: controller.sendCommand("WAKEUP") }
+                            SecondaryActionButton {
+                                Layout.preferredWidth: root.cCmdButtonW
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                                text: "复位 RESET"
+                                onClicked: controller.sendCommand("RESET")
+                            }
+                            SecondaryActionButton {
+                                Layout.preferredWidth: root.cCmdButtonW
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                                text: "自校准 SELFCAL"
+                                onClicked: controller.sendCommand("SELFCAL")
+                            }
+                            SecondaryActionButton {
+                                Layout.preferredWidth: root.cCmdButtonW
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                                text: "同步 SYNC"
+                                onClicked: controller.sendCommand("SYNC")
+                            }
+                            SecondaryActionButton {
+                                Layout.preferredWidth: root.cCmdButtonW
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
+                                text: "唤醒 WAKEUP"
+                                onClicked: controller.sendCommand("WAKEUP")
+                            }
                         }
 
                         RowLayout {
                             Layout.fillWidth: true
-                            TextField {
+                            Layout.bottomMargin: root.cSectionContentPad
+                            FluentTextField {
                                 id: customCmdEdit
                                 Layout.fillWidth: true
-                                placeholderText: "手动命令，例如: CFG PSEL=AIN0 NSEL=AINCOM PGA=8"
+                                Layout.preferredHeight: root.cControlH
+                                placeholderText: "手动命令，例如: CFG PSEL=AIN0 NSEL=AINCOM PGA=8 CHMASK=0x0F"
                             }
-                            Button {
+                            SecondaryActionButton {
                                 text: "发送"
+                                Layout.preferredHeight: root.cControlH
+                                Layout.preferredWidth: root.cCmdSendButtonW
+                                Layout.alignment: Qt.AlignHCenter | Qt.AlignVCenter
                                 onClicked: {
                                     controller.sendCustomCommand(customCmdEdit.text)
                                     customCmdEdit.clear()
@@ -412,21 +1251,78 @@ ApplicationWindow {
                     }
                 }
 
-                GroupBox {
-                    title: "8通道显隐"
-                    Layout.fillWidth: true
-                    enabled: controller.acqMode === "SCAN8"
+                SectionCard {
+                    id: scanSection
+                    title: "05 多通道采样与显示"
+                    enabled: root.multiMode
 
                     GridLayout {
-                        anchors.fill: parent
-                        columns: 4
-                        rowSpacing: 6
-                        columnSpacing: 8
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !scanSection.collapsed
+                        opacity: scanSection.collapsed ? 0.0 : 1.0
+                        height: scanSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        columns: root.layoutScanVisibleColumns
+                        rowSpacing: 8
+                        columnSpacing: 10
+
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
+                            }
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
+
+                        Label {
+                            Layout.columnSpan: root.layoutScanVisibleColumns
+                            text: "采样通道（多通道模式下生效，影响 CHMASK）"
+                            color: root.cSubtle
+                            font.pixelSize: 12
+                        }
 
                         Repeater {
                             model: 8
-                            delegate: CheckBox {
+                            delegate: FluentCheckBox {
                                 required property int index
+                                Layout.preferredHeight: root.cControlH
+                                Layout.alignment: Qt.AlignVCenter
+                                text: "AIN" + index
+                                checked: scanSampleFlags[index]
+                                onToggled: {
+                                    const accepted = controller.setScanChannelSampling(index, checked)
+                                    if (!accepted) {
+                                        checked = !checked
+                                        scanSampleFlags[index] = checked
+                                        return
+                                    }
+                                    scanSampleFlags[index] = checked
+                                }
+                            }
+                        }
+
+                        Label {
+                            Layout.columnSpan: root.layoutScanVisibleColumns
+                            text: "显示通道（仅影响曲线显示）"
+                            color: root.cSubtle
+                            font.pixelSize: 12
+                        }
+
+                        Repeater {
+                            model: 8
+                            delegate: FluentCheckBox {
+                                required property int index
+                                Layout.preferredHeight: root.cControlH
+                                Layout.alignment: Qt.AlignVCenter
                                 text: "AIN" + index
                                 checked: scanVisibleFlags[index]
                                 onToggled: {
@@ -434,6 +1330,11 @@ ApplicationWindow {
                                     controller.setScanChannelVisible(index, checked)
                                 }
                             }
+                        }
+
+                        Item {
+                            Layout.columnSpan: root.layoutScanVisibleColumns
+                            Layout.preferredHeight: root.cSectionContentPad
                         }
                     }
                 }
@@ -454,35 +1355,95 @@ ApplicationWindow {
                 anchors.margins: 12
                 spacing: 10
 
-                GridLayout {
-                    Layout.fillWidth: true
-                    columns: width > 900 ? 4 : 2
-                    rowSpacing: 8
-                    columnSpacing: 8
+                Rectangle {
+                    id: metricsPanel
+                    property real expandedHeight: metricsHeader.implicitHeight + metricsGrid.implicitHeight + 18
+                    property real panelHeight: root.metricsPanelCollapsed
+                                               ? root.metricsPanelCollapsedHeight
+                                               : Math.max(root.metricsPanelCollapsedHeight, expandedHeight)
 
-                    MetricCard {
-                        Layout.fillWidth: true
-                        title: "最新 ADC"
-                        value: controller.latestAdText
-                        accent: "#ff8a3d"
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: panelHeight
+                    color: root.cCard
+                    radius: 10
+                    border.color: root.cPanelBorder
+                    border.width: 1
+                    clip: true
+
+                    Behavior on panelHeight {
+                        NumberAnimation {
+                            duration: root.metricsPanelAnimMs
+                            easing.type: Easing.InOutCubic
+                        }
                     }
-                    MetricCard {
-                        Layout.fillWidth: true
-                        title: "电压"
-                        value: controller.latestVoltageText
-                        accent: "#00c2a8"
-                    }
-                    MetricCard {
-                        Layout.fillWidth: true
-                        title: "采样数"
-                        value: controller.sampleCount.toString()
-                        accent: "#4ea1ff"
-                    }
-                    MetricCard {
-                        Layout.fillWidth: true
-                        title: "十六进制"
-                        value: controller.latestHexText
-                        accent: "#f06b8f"
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 6
+
+                        RowLayout {
+                            id: metricsHeader
+                            Layout.fillWidth: true
+
+                            Label {
+                                text: "实时指标"
+                                color: root.cTitle
+                                font.bold: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            FluentToolButton {
+                                text: root.metricsPanelCollapsed ? "展开" : "收起"
+                                onClicked: root.metricsPanelCollapsed = !root.metricsPanelCollapsed
+                            }
+                        }
+
+                        GridLayout {
+                            id: metricsGrid
+                            visible: !root.metricsPanelCollapsed || opacity > 0.01
+                            enabled: !root.metricsPanelCollapsed
+                            opacity: root.metricsPanelCollapsed ? 0.0 : 1.0
+                            Layout.fillWidth: true
+                            columns: width > root.layoutMetricsBreakpoint
+                                     ? root.layoutMetricsColumnsWide
+                                     : root.layoutMetricsColumnsNarrow
+                            rowSpacing: 8
+                            columnSpacing: 8
+
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: Math.round(root.metricsPanelAnimMs * 0.65)
+                                    easing.type: Easing.InOutQuad
+                                }
+                            }
+
+                            MetricCard {
+                                Layout.fillWidth: true
+                                title: "最新 ADC"
+                                value: controller.latestAdText
+                                accent: "#ff8a3d"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                title: "电压"
+                                value: controller.latestVoltageText
+                                accent: "#00c2a8"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                title: "采样数"
+                                value: controller.sampleCount.toString()
+                                accent: "#4ea1ff"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                title: "十六进制"
+                                value: controller.latestHexText
+                                accent: "#f06b8f"
+                            }
+                        }
                     }
                 }
 
@@ -501,125 +1462,311 @@ ApplicationWindow {
                         spacing: 6
 
                         Label {
-                            text: controller.acqMode === "SCAN8" ? "实时 ADC 曲线（8通道）" : "实时 ADC 曲线"
+                            text: root.multiMode ? "实时曲线（多通道）" : "实时曲线"
                             color: root.cTitle
                             font.pixelSize: 14
                             font.bold: true
                         }
 
-                        ChartView {
-                            id: chartView
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Label {
+                                Layout.fillWidth: true
+                                text: controller.zoomActive
+                                      ? "框选放大已启用"
+                                      : "左键拖拽可框选放大"
+                                color: root.cSubtle
+                                elide: Label.ElideRight
+                            }
+
+                            SecondaryActionButton {
+                                visible: controller.zoomActive
+                                text: "退出放大"
+                                onClicked: controller.resetZoom()
+                            }
+                        }
+
+                        Item {
                             Layout.fillWidth: true
                             Layout.fillHeight: true
-                            antialiasing: true
-                            backgroundColor: "#ffffff"
-                            legend.visible: controller.acqMode === "SCAN8"
-                            margins.left: 8
-                            margins.right: 8
-                            margins.top: 8
-                            margins.bottom: 8
+                            property bool selecting: false
+                            property real startX: 0
+                            property real startY: 0
+                            function zoomMapSeries() {
+                                if (!root.multiMode) {
+                                    return singleSeries
+                                }
 
-                            ValueAxis {
-                                id: axisX
-                                min: controller.axisXMin
-                                max: controller.axisXMax
-                                labelsColor: "#445c74"
-                                titleText: "时间 (s)"
-                                gridLineColor: root.cGrid
+                                const scanSeries = [ch0, ch1, ch2, ch3, ch4, ch5, ch6, ch7]
+                                for (let i = 0; i < scanSeries.length; ++i) {
+                                    if (scanSeries[i] && scanSeries[i].visible) {
+                                        return scanSeries[i]
+                                    }
+                                }
+
+                                return ch0 ? ch0 : singleSeries
                             }
 
-                            ValueAxis {
-                                id: axisY
-                                min: controller.axisYMin
-                                max: controller.axisYMax
-                                labelsColor: "#445c74"
-                                titleText: "电压 (V)"
-                                gridLineColor: root.cGrid
+                            ChartView {
+                                id: chartView
+                                anchors.fill: parent
+                                antialiasing: true
+                                theme: ChartView.ChartThemeLight
+                                backgroundColor: "#fdfefe"
+                                plotAreaColor: "#ffffff"
+                                backgroundRoundness: 8
+                                dropShadowEnabled: false
+                                legend.visible: root.multiMode
+                                legend.alignment: Qt.AlignBottom
+                                legend.labelColor: root.cSubtle
+                                legend.font.pixelSize: 11
+                                margins.left: 8
+                                margins.right: 8
+                                margins.top: 8
+                                margins.bottom: 8
+
+                                ValueAxis {
+                                    id: axisX
+                                    min: controller.axisXMin
+                                    max: controller.axisXMax
+                                    labelsColor: root.cSubtle
+                                    labelsFont.pixelSize: 11
+                                    labelFormat: controller.axisXInHours ? "%.2f" : "%.0f"
+                                    titleText: controller.axisXInHours ? "时间 (h)" : "时间 (s)"
+                                    titleFont.pixelSize: 12
+                                    titleFont.bold: true
+                                    gridLineColor: root.cGrid
+                                }
+
+                                ValueAxis {
+                                    id: axisY
+                                    min: controller.axisYMin
+                                    max: controller.axisYMax
+                                    labelsColor: root.cSubtle
+                                    labelsFont.pixelSize: 11
+                                    titleText: "电压 (V)"
+                                    titleFont.pixelSize: 12
+                                    titleFont.bold: true
+                                    gridLineColor: root.cGrid
+                                }
+
+                                LineSeries {
+                                    id: singleShadowSeries
+                                    axisX: axisX
+                                    axisY: axisY
+                                    color: "#bcc6d2"
+                                    width: 2.8
+                                    visible: !root.multiMode
+                                    name: "Raw"
+                                }
+                                LineSeries {
+                                    id: singleSeries
+                                    axisX: axisX
+                                    axisY: axisY
+                                    color: "#ff9e58"
+                                    width: 2.2
+                                    visible: !root.multiMode
+                                    name: "Filtered"
+                                }
+
+                                LineSeries { id: ch0; axisX: axisX; axisY: axisY; color: channelColors[0]; name: "AIN0" }
+                                LineSeries { id: ch1; axisX: axisX; axisY: axisY; color: channelColors[1]; name: "AIN1" }
+                                LineSeries { id: ch2; axisX: axisX; axisY: axisY; color: channelColors[2]; name: "AIN2" }
+                                LineSeries { id: ch3; axisX: axisX; axisY: axisY; color: channelColors[3]; name: "AIN3" }
+                                LineSeries { id: ch4; axisX: axisX; axisY: axisY; color: channelColors[4]; name: "AIN4" }
+                                LineSeries { id: ch5; axisX: axisX; axisY: axisY; color: channelColors[5]; name: "AIN5" }
+                                LineSeries { id: ch6; axisX: axisX; axisY: axisY; color: channelColors[6]; name: "AIN6" }
+                                LineSeries { id: ch7; axisX: axisX; axisY: axisY; color: channelColors[7]; name: "AIN7" }
+
+                                Component.onCompleted: {
+                                    controller.attachSeries(
+                                        singleShadowSeries,
+                                        singleSeries,
+                                        ch0,
+                                        ch1,
+                                        ch2,
+                                        ch3,
+                                        ch4,
+                                        ch5,
+                                        ch6,
+                                        ch7)
+                                }
                             }
 
-                            LineSeries {
-                                id: singleShadowSeries
-                                axisX: axisX
-                                axisY: axisY
-                                color: "#bcc6d2"
-                                width: 2.8
-                                visible: controller.acqMode !== "SCAN8"
-                                name: "Raw"
-                            }
-                            LineSeries {
-                                id: singleSeries
-                                axisX: axisX
-                                axisY: axisY
-                                color: "#ff9e58"
-                                width: 2.2
-                                visible: controller.acqMode !== "SCAN8"
-                                name: "Filtered"
+                            MouseArea {
+                                anchors.fill: parent
+                                acceptedButtons: Qt.LeftButton
+                                hoverEnabled: true
+
+                                onPressed: function(mouse) {
+                                    parent.selecting = true
+                                    parent.startX = mouse.x
+                                    parent.startY = mouse.y
+                                    selectionRect.x = mouse.x
+                                    selectionRect.y = mouse.y
+                                    selectionRect.width = 0
+                                    selectionRect.height = 0
+                                    selectionRect.visible = true
+                                }
+
+                                onPositionChanged: function(mouse) {
+                                    if (!parent.selecting) {
+                                        return
+                                    }
+
+                                    const left = Math.min(parent.startX, mouse.x)
+                                    const top = Math.min(parent.startY, mouse.y)
+                                    const right = Math.max(parent.startX, mouse.x)
+                                    const bottom = Math.max(parent.startY, mouse.y)
+
+                                    selectionRect.x = left
+                                    selectionRect.y = top
+                                    selectionRect.width = right - left
+                                    selectionRect.height = bottom - top
+                                }
+
+                                onReleased: function(mouse) {
+                                    if (!parent.selecting) {
+                                        return
+                                    }
+
+                                    parent.selecting = false
+                                    selectionRect.visible = false
+
+                                    const width = Math.abs(mouse.x - parent.startX)
+                                    const height = Math.abs(mouse.y - parent.startY)
+                                    if (width < 12 || height < 12) {
+                                        return
+                                    }
+
+                                    const mapSeries = parent.zoomMapSeries()
+                                    if (!mapSeries) {
+                                        return
+                                    }
+
+                                    const p1 = chartView.mapToValue(Qt.point(selectionRect.x, selectionRect.y), mapSeries)
+                                    const p2 = chartView.mapToValue(
+                                                   Qt.point(selectionRect.x + selectionRect.width,
+                                                            selectionRect.y + selectionRect.height),
+                                                   mapSeries)
+
+                                    const xMin = Math.min(p1.x, p2.x)
+                                    const xMax = Math.max(p1.x, p2.x)
+                                    const yMin = Math.min(p1.y, p2.y)
+                                    const yMax = Math.max(p1.y, p2.y)
+
+                                    if (isFinite(xMin) && isFinite(xMax) && isFinite(yMin) && isFinite(yMax)) {
+                                        controller.setZoomRange(xMin, xMax, yMin, yMax)
+                                    }
+                                }
                             }
 
-                            LineSeries { id: ch0; axisX: axisX; axisY: axisY; color: channelColors[0]; name: "AIN0" }
-                            LineSeries { id: ch1; axisX: axisX; axisY: axisY; color: channelColors[1]; name: "AIN1" }
-                            LineSeries { id: ch2; axisX: axisX; axisY: axisY; color: channelColors[2]; name: "AIN2" }
-                            LineSeries { id: ch3; axisX: axisX; axisY: axisY; color: channelColors[3]; name: "AIN3" }
-                            LineSeries { id: ch4; axisX: axisX; axisY: axisY; color: channelColors[4]; name: "AIN4" }
-                            LineSeries { id: ch5; axisX: axisX; axisY: axisY; color: channelColors[5]; name: "AIN5" }
-                            LineSeries { id: ch6; axisX: axisX; axisY: axisY; color: channelColors[6]; name: "AIN6" }
-                            LineSeries { id: ch7; axisX: axisX; axisY: axisY; color: channelColors[7]; name: "AIN7" }
-
-                            Component.onCompleted: {
-                                controller.attachSeries(
-                                    singleShadowSeries,
-                                    singleSeries,
-                                    ch0,
-                                    ch1,
-                                    ch2,
-                                    ch3,
-                                    ch4,
-                                    ch5,
-                                    ch6,
-                                    ch7)
+                            Rectangle {
+                                id: selectionRect
+                                visible: false
+                                color: "#3a76d422"
+                                border.color: "#3a76d4"
+                                border.width: 1
+                                radius: 2
                             }
                         }
                     }
                 }
 
                 Rectangle {
+                    id: logPanel
+                    property real panelHeight: root.logPanelCollapsed
+                                               ? root.logPanelCollapsedHeight
+                                               : root.logPanelExpandedHeight
                     Layout.fillWidth: true
-                    Layout.preferredHeight: 260
+                    Layout.preferredHeight: panelHeight
                     color: root.cCard
                     radius: 10
                     border.color: root.cPanelBorder
                     border.width: 1
+                    clip: true
+
+                    Behavior on panelHeight {
+                        NumberAnimation {
+                            duration: root.logPanelAnimMs
+                            easing.type: Easing.InOutCubic
+                        }
+                    }
 
                     ColumnLayout {
                         anchors.fill: parent
-                        anchors.margins: 8
+                        anchors.margins: root.logPanelCollapsed ? 6 : 8
                         spacing: 6
 
                         RowLayout {
                             Layout.fillWidth: true
                             Label {
-                                text: "串口流 + SQL 日志"
+                                text: "串口日志"
                                 color: root.cTitle
                                 font.bold: true
                             }
                             Item { Layout.fillWidth: true }
-                            Button {
-                                text: "清空显示"
-                                onClicked: controller.clearLogView()
-                            }
-                            Button {
-                                text: "清空SQL"
-                                onClicked: controller.clearLogStorage()
+                            ColumnLayout {
+                                spacing: 6
+                                Layout.alignment: Qt.AlignRight | Qt.AlignTop
+
+                                RowLayout {
+                                    spacing: 8
+
+                                    SecondaryActionButton {
+                                        visible: !root.logPanelCollapsed
+                                        text: "打开日志文件"
+                                        onClicked: controller.openLogFileDialog()
+                                    }
+
+                                    SecondaryActionButton {
+                                        visible: !root.logPanelCollapsed
+                                        text: "打开数据文件"
+                                        onClicked: controller.openDataFileDialog()
+                                    }
+
+                                    SecondaryActionButton {
+                                        visible: !root.logPanelCollapsed
+                                        text: "清空显示"
+                                        onClicked: controller.clearLogView()
+                                    }
+
+                                    SecondaryActionButton {
+                                        visible: !root.logPanelCollapsed
+                                        text: "清空日志文件"
+                                        onClicked: controller.clearLogStorage()
+                                    }
+                                }
+
+                                FluentToolButton {
+                                    Layout.alignment: Qt.AlignRight
+                                    text: root.logPanelCollapsed ? "展开" : "收起"
+                                    onClicked: root.logPanelCollapsed = !root.logPanelCollapsed
+                                }
                             }
                         }
 
                         ListView {
                             id: logList
+                            visible: !root.logPanelCollapsed || opacity > 0.01
+                            enabled: !root.logPanelCollapsed
+                            opacity: root.logPanelCollapsed ? 0.0 : 1.0
                             Layout.fillWidth: true
-                            Layout.fillHeight: true
+                            Layout.fillHeight: !root.logPanelCollapsed
+                            Layout.preferredHeight: root.logPanelCollapsed ? 0 : -1
+                            Layout.maximumHeight: root.logPanelCollapsed ? 0 : 16777215
                             model: controller.logModel
                             clip: true
                             spacing: 2
+
+                            Behavior on opacity {
+                                NumberAnimation {
+                                    duration: Math.round(root.logPanelAnimMs * 0.6)
+                                    easing.type: Easing.InOutQuad
+                                }
+                            }
 
                             delegate: Label {
                                 required property string timestamp
@@ -638,6 +1785,74 @@ ApplicationWindow {
                                 }
                             }
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    Dialog {
+        id: stopConfirmDialog
+        title: "结束采样"
+        modal: true
+        anchors.centerIn: Overlay.overlay
+        closePolicy: Popup.NoAutoClose
+        padding: 16
+
+        Overlay.modal: Rectangle {
+            color: "#5f0f172a"
+        }
+
+        background: Rectangle {
+            radius: 12
+            color: "#ffffff"
+            border.color: root.cPanelBorder
+            border.width: 1
+        }
+
+        contentItem: ColumnLayout {
+            spacing: 10
+
+            Label {
+                text: "本次会话采样数: " + controller.sampleCount + "。结束前是否提交最后 SQL 缓冲？"
+                wrapMode: Text.WordWrap
+                color: root.cText
+                font.pixelSize: 13
+                Layout.preferredWidth: 340
+            }
+
+            Label {
+                text: "原始数据已实时写入 CSV，即使异常退出也可查看已写入部分。"
+                color: root.cSubtle
+                font.pixelSize: 12
+                wrapMode: Text.WordWrap
+            }
+
+            RowLayout {
+                Layout.alignment: Qt.AlignRight
+                spacing: 8
+
+                PrimaryActionButton {
+                    text: "提交 SQL 并结束"
+                    onClicked: {
+                        stopConfirmDialog.close()
+                        root.finishStopFlow(true)
+                    }
+                }
+
+                SecondaryActionButton {
+                    text: "直接结束"
+                    onClicked: {
+                        stopConfirmDialog.close()
+                        root.finishStopFlow(false)
+                    }
+                }
+
+                SecondaryActionButton {
+                    text: "继续采样"
+                    onClicked: {
+                        stopConfirmDialog.close()
+                        root.stopDisconnectAfterSave = false
                     }
                 }
             }

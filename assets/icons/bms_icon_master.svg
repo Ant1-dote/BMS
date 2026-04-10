@@ -1,0 +1,24 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#1B5076"/>
+      <stop offset="100%" stop-color="#0E3A5B"/>
+    </linearGradient>
+    <linearGradient id="battery" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0%" stop-color="#37C995"/>
+      <stop offset="100%" stop-color="#1FA97A"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="80" y="80" width="864" height="864" rx="220" fill="url(#bg)"/>
+
+  <rect x="230" y="330" width="490" height="340" rx="56" fill="none" stroke="#EAF4FF" stroke-width="36"/>
+  <rect x="720" y="430" width="70" height="140" rx="18" fill="#EAF4FF"/>
+
+  <path d="M300 520 L390 520 L445 460 L535 590 L605 470 L670 470" fill="none" stroke="url(#battery)" stroke-width="46" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <path d="M690 250 L795 300 L795 430 C795 515 742 578 690 602 C638 578 585 515 585 430 L585 300 Z" fill="#E39A2D" opacity="0.96"/>
+  <path d="M640 430 L677 468 L746 378" fill="none" stroke="#1C3C57" stroke-width="30" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <rect x="80" y="80" width="864" height="864" rx="220" fill="none" stroke="#9DC0DA" stroke-opacity="0.45" stroke-width="6"/>
+</svg>
