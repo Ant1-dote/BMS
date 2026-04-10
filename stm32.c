@@ -101,23 +101,28 @@ static void MX_SPI1_Init(void);
 #define ADS1256_DELAY_T6_US     8U
 /* t11 对 SYNC/RDATAC 场景需 >= 24 * tCLKIN (约 3.13us) */
 #define ADS1256_DELAY_T11_US    4U
+/* 读出24位结果后，给DRDY恢复到高电平的最小缓冲时间。 */
+#define ADS1256_DELAY_DRDY_RECOVER_US 2U
 
 /* 基础底层函数 */
 static HAL_StatusTypeDef ADS1256_WriteReg(uint8_t reg, uint8_t value);
 static HAL_StatusTypeDef ADS1256_SendCmd(uint8_t cmd);
 static HAL_StatusTypeDef ADS1256_ReadReg(uint8_t reg, uint8_t *value);
 static HAL_StatusTypeDef ADS1256_WaitDRDY(uint32_t timeout_ms);
+static HAL_StatusTypeDef ADS1256_WaitDRDYEdge(uint32_t timeout_ms);
 static void ADS1256_DelayUs(uint32_t us);
 static void ADS1256_EnableGPIOClock(GPIO_TypeDef *port);
 static HAL_StatusTypeDef ADS1256_SetPGAValue(uint8_t pga);
 static HAL_StatusTypeDef ADS1256_SetDataRate(uint8_t drate);
 static uint32_t ADS1256_DrdyTimeoutMsByDrate(uint8_t drate);
+static uint8_t ADS1256_ScanDiscardCountByDrate(uint8_t drate);
 static void ADS1256_ProcessPendingCommand(void);
 
 /* 功能 API */
 static HAL_StatusTypeDef ADS1256_Init(void);
 static HAL_StatusTypeDef ADS1256_SetChannel(uint8_t pos_ch, uint8_t neg_ch);
 static HAL_StatusTypeDef ADS1256_Read_ADC(uint8_t pos_ch, uint8_t neg_ch, int32_t *adc_out);
+static HAL_StatusTypeDef ADS1256_Read_ADC_CurrentRData(int32_t *adc_out);
 static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *failed_ch);
 
 /* 连续模式 (RDATAC) 功能 API */
@@ -171,6 +176,8 @@ static uint8_t g_rdatac_active = 0U;
 static uint16_t g_zero_streak = 0U;
 static int32_t g_scan_cache[8] = {0};
 static uint8_t g_scan_cache_valid_mask = 0U;
+static uint8_t g_rdata_last_pos = 0xFFU;
+static uint8_t g_rdata_last_neg = 0xFFU;
 
 static uint8_t ADS1256_PgaToCode(uint8_t pga)
 {
@@ -285,6 +292,25 @@ static uint32_t ADS1256_DrdyTimeoutMsByDrate(uint8_t drate)
   }
 }
 
+static uint8_t ADS1256_ScanDiscardCountByDrate(uint8_t drate)
+{
+  switch (drate)
+  {
+    case ADS1256_DRATE_30000SPS:
+    case ADS1256_DRATE_15000SPS:
+    case ADS1256_DRATE_7500SPS:
+      return 2U;
+
+    case ADS1256_DRATE_3750SPS:
+    case ADS1256_DRATE_2000SPS:
+    case ADS1256_DRATE_1000SPS:
+      return 1U;
+
+    default:
+      return 0U;
+  }
+}
+
 static void ADS1256_CopyPendingCommand(char *dst, uint32_t dst_size)
 {
   uint32_t i;
@@ -393,6 +419,8 @@ static void ADS1256_ExecuteCommand(const char *line)
   if (ADS1256_StrEqNoCase(token, "SINGLE"))
   {
     g_sample_mode = ADS1256_SAMPLE_SINGLE;
+    g_rdata_last_pos = 0xFFU;
+    g_rdata_last_neg = 0xFFU;
     printf("ACQ MODE SINGLE\r\n");
     return;
   }
@@ -400,6 +428,8 @@ static void ADS1256_ExecuteCommand(const char *line)
   if (ADS1256_StrEqNoCase(token, "SCAN8") || ADS1256_StrEqNoCase(token, "MULTI"))
   {
     g_sample_mode = ADS1256_SAMPLE_SCAN8;
+    g_rdata_last_pos = 0xFFU;
+    g_rdata_last_neg = 0xFFU;
     if (g_rdatac_active != 0U)
     {
       (void)ADS1256_StopContinuousMode();
@@ -425,6 +455,8 @@ static void ADS1256_ExecuteCommand(const char *line)
       g_scan_mask = 0xFFU;
       g_scan_cache_valid_mask = 0U;
       g_sample_mode = ADS1256_SAMPLE_SINGLE;
+      g_rdata_last_pos = 0xFFU;
+      g_rdata_last_neg = 0xFFU;
       g_zero_streak = 0U;
       printf("RESET OK\r\n");
     }
@@ -622,7 +654,19 @@ static void ADS1256_ExecuteCommand(const char *line)
   }
 
   st = HAL_OK;
-  if (has_pga != 0U)
+  if (((has_pga != 0U) || (has_drate != 0U) || (has_pos != 0U) || (has_neg != 0U))
+      && (g_rdatac_active != 0U))
+  {
+    st = ADS1256_StopContinuousMode();
+    if (st == HAL_OK)
+    {
+      g_rdatac_active = 0U;
+      g_rdata_last_pos = 0xFFU;
+      g_rdata_last_neg = 0xFFU;
+    }
+  }
+
+  if ((st == HAL_OK) && (has_pga != 0U))
   {
     st = ADS1256_SetPGAValue(new_pga);
   }
@@ -645,6 +689,8 @@ static void ADS1256_ExecuteCommand(const char *line)
   if ((st == HAL_OK) && (has_acq != 0U))
   {
     g_sample_mode = new_acq;
+    g_rdata_last_pos = 0xFFU;
+    g_rdata_last_neg = 0xFFU;
   }
 
   if ((st == HAL_OK) && (has_scan_mask != 0U))
@@ -675,6 +721,8 @@ static void ADS1256_ExecuteCommand(const char *line)
     g_cfg_drate = new_drate;
     g_scan_mask = new_scan_mask;
     g_scan_cache_valid_mask &= g_scan_mask;
+    g_rdata_last_pos = 0xFFU;
+    g_rdata_last_neg = 0xFFU;
     ADS1256_PrintConfig();
     printf("CFG OK\r\n");
   }
@@ -826,6 +874,30 @@ static HAL_StatusTypeDef ADS1256_WaitDRDY(uint32_t timeout_ms)
   return HAL_OK;
 }
 
+static HAL_StatusTypeDef ADS1256_WaitDRDYEdge(uint32_t timeout_ms)
+{
+  uint32_t start = HAL_GetTick();
+
+  /* 先等待当前低电平结束，避免把同一次转换结果重复判为“新数据”。 */
+  while (HAL_GPIO_ReadPin(DRDY_GPIO_Port, DRDY_Pin) == GPIO_PIN_RESET)
+  {
+    if ((HAL_GetTick() - start) > timeout_ms)
+    {
+      return HAL_TIMEOUT;
+    }
+  }
+
+  while (HAL_GPIO_ReadPin(DRDY_GPIO_Port, DRDY_Pin) == GPIO_PIN_SET)
+  {
+    if ((HAL_GetTick() - start) > timeout_ms)
+    {
+      return HAL_TIMEOUT;
+    }
+  }
+
+  return HAL_OK;
+}
+
 static void ADS1256_DelayUs(uint32_t us)
 {
   uint32_t i;
@@ -849,6 +921,47 @@ static HAL_StatusTypeDef ADS1256_SetChannel(uint8_t pos_ch, uint8_t neg_ch)
 {
   uint8_t mux = ((pos_ch & 0x0FU) << 4) | (neg_ch & 0x0FU);
   return ADS1256_WriteReg(ADS1256_REG_MUX, mux);
+}
+
+static HAL_StatusTypeDef ADS1256_Read_ADC_CurrentRData(int32_t *adc_out)
+{
+  uint8_t buf[3];
+  HAL_StatusTypeDef st;
+  int32_t adc;
+
+  if (adc_out == NULL)
+  {
+    return HAL_ERROR;
+  }
+
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
+
+  buf[0] = ADS1256_CMD_RDATA;
+  st = HAL_SPI_Transmit(&hspi1, buf, 1, 100);
+  if (st != HAL_OK)
+  {
+    HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
+    return st;
+  }
+
+  ADS1256_DelayUs(ADS1256_DELAY_T6_US);
+  st = HAL_SPI_Receive(&hspi1, buf, 3, 100);
+
+  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
+  if (st != HAL_OK)
+  {
+    return st;
+  }
+
+  adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
+  if ((adc & 0x800000L) != 0)
+  {
+    adc -= 0x1000000L;
+  }
+
+  ADS1256_DelayUs(ADS1256_DELAY_DRDY_RECOVER_US);
+  *adc_out = adc;
+  return HAL_OK;
 }
 
 /**
@@ -911,7 +1024,13 @@ static HAL_StatusTypeDef ADS1256_Init(void)
   if (st != HAL_OK) return st;
 
   /* 校准过程需要时间，阻塞等待 DRDY 变低表示校准完成 */
-  return ADS1256_WaitDRDY(1000U);
+  st = ADS1256_WaitDRDY(1000U);
+  if (st == HAL_OK)
+  {
+    g_rdata_last_pos = 0xFFU;
+    g_rdata_last_neg = 0xFFU;
+  }
+  return st;
 }
 
 /**
@@ -920,64 +1039,51 @@ static HAL_StatusTypeDef ADS1256_Init(void)
   */
 static HAL_StatusTypeDef ADS1256_Read_ADC(uint8_t pos_ch, uint8_t neg_ch, int32_t *adc_out)
 {
-  uint8_t buf[3];
-  int32_t adc;
   HAL_StatusTypeDef st;
   const uint32_t drdy_timeout_ms = ADS1256_DrdyTimeoutMsByDrate(g_cfg_drate);
+  const uint8_t need_reprime = (uint8_t)((pos_ch != g_rdata_last_pos) || (neg_ch != g_rdata_last_neg));
 
   if (adc_out == NULL) return HAL_ERROR;
 
-  /* 1. 切换多路复用器 */
-  st = ADS1256_SetChannel(pos_ch, neg_ch);
-  if (st != HAL_OK) return st;
-
-  /* 2. 重置数字滤波器：发送 SYNC 然后发送 WAKEUP */
-  st = ADS1256_SendCmd(ADS1256_CMD_SYNC);
-  if (st != HAL_OK) return st;
-
-  st = ADS1256_SendCmd(ADS1256_CMD_WAKEUP);
-  if (st != HAL_OK) return st;
-
-  /*
-   * 3. 核心机制：等待滤波器稳定 (Wait for t18)
-   *    发出 SYNC -> WAKEUP 后，ADS1256 的内部滤波器会重新开始采样。
-   *    此时等待 DRDY 引脚产生下降沿，就正好等效于渡过了 t18 滤波器建立时间。
-   *    这是获取多通道切换后“干净且完全建立”的数据的最规范做法。
-   */
-  st = ADS1256_WaitDRDY(drdy_timeout_ms);
-  if (st != HAL_OK) return st;
-
-  /* 4. 发送 RDATA 指令并读回 24 位数据 (整个过程 CS 保持拉低) */
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_RESET);
-
-  buf[0] = ADS1256_CMD_RDATA;
-  st = HAL_SPI_Transmit(&hspi1, buf, 1, 100);
-  if (st != HAL_OK) goto end;
-
-  /* 发送 RDATA 命令后，需等待 t6 才能读数据 */
-  ADS1256_DelayUs(ADS1256_DELAY_T6_US);
-
-  st = HAL_SPI_Receive(&hspi1, buf, 3, 100);
-
-end:
-  HAL_GPIO_WritePin(CS_GPIO_Port, CS_Pin, GPIO_PIN_SET);
-  if (st != HAL_OK) return st;
-
-  /* 5. 数据拼接与符号扩展 (24-bit 补码) */
-  adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
-  if ((adc & 0x800000L) != 0)
+  if (need_reprime != 0U)
   {
-    adc -= 0x1000000L;
+    /* 1. 切换多路复用器 */
+    st = ADS1256_SetChannel(pos_ch, neg_ch);
+    if (st != HAL_OK) return st;
+
+    /* 2. 重置数字滤波器：发送 SYNC 然后发送 WAKEUP */
+    st = ADS1256_SendCmd(ADS1256_CMD_SYNC);
+    if (st != HAL_OK) return st;
+
+    st = ADS1256_SendCmd(ADS1256_CMD_WAKEUP);
+    if (st != HAL_OK) return st;
+
+    /*
+     * 3. 等待滤波器稳定 (Wait for t18)
+     *    使用 DRDY 下降沿，避免因为 DRDY 仍为低电平导致的重复读数。
+     */
+    st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
+    if (st != HAL_OK) return st;
+
+    g_rdata_last_pos = pos_ch;
+    g_rdata_last_neg = neg_ch;
+  }
+  else
+  {
+    st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
+    if (st != HAL_OK) return st;
   }
 
-  *adc_out = adc;
-  return HAL_OK;
+  return ADS1256_Read_ADC_CurrentRData(adc_out);
 }
 
 static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *failed_ch)
 {
   uint8_t ch;
+  uint8_t i;
+  int32_t discarded_adc;
   const uint8_t scan_mask = g_scan_mask;
+  const uint8_t discard_count = ADS1256_ScanDiscardCountByDrate(g_cfg_drate);
   HAL_StatusTypeDef st;
 
   if (failed_ch != NULL)
@@ -1000,6 +1106,19 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Scan8(int32_t adc_out[8], uint8_t *fai
     if ((scan_mask & (uint8_t)(1U << ch)) == 0U)
     {
       continue;
+    }
+
+    for (i = 0U; i < discard_count; i++)
+    {
+      st = ADS1256_Read_ADC(ch, ADS1256_AINCOM, &discarded_adc);
+      if (st != HAL_OK)
+      {
+        if (failed_ch != NULL)
+        {
+          *failed_ch = ch;
+        }
+        return st;
+      }
     }
 
     st = ADS1256_Read_ADC(ch, ADS1256_AINCOM, &g_scan_cache[ch]);
@@ -1048,7 +1167,7 @@ static HAL_StatusTypeDef ADS1256_StartContinuousMode(void)
   }
 
   /* 等待首个 DRDY 下降沿，确保后续读到的是有效转换结果。 */
-  return ADS1256_WaitDRDY(drdy_timeout_ms);
+  return ADS1256_WaitDRDYEdge(drdy_timeout_ms);
 }
 
 static HAL_StatusTypeDef ADS1256_StopContinuousMode(void)
@@ -1070,7 +1189,7 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Continuous(int32_t *adc_out)
   if (adc_out == NULL) return HAL_ERROR;
 
   /* 1. 监测 DRDY 下降沿 */
-  st = ADS1256_WaitDRDY(drdy_timeout_ms);
+  st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
   if (st != HAL_OK) return st;
 
   /* 2. DRDY 变低后，直接读出 24 位数据 */
@@ -1084,6 +1203,7 @@ static HAL_StatusTypeDef ADS1256_Read_ADC_Continuous(int32_t *adc_out)
   int32_t adc = ((int32_t)buf[0] << 16) | ((int32_t)buf[1] << 8) | (int32_t)buf[2];
   if (adc & 0x800000L) adc -= 0x1000000L;
 
+  ADS1256_DelayUs(ADS1256_DELAY_DRDY_RECOVER_US);
   *adc_out = adc;
   return HAL_OK;
 }
@@ -1133,7 +1253,7 @@ static HAL_StatusTypeDef ADS1256_RecoverContinuousStream(void)
     return st;
   }
 
-  st = ADS1256_WaitDRDY(drdy_timeout_ms);
+  st = ADS1256_WaitDRDYEdge(drdy_timeout_ms);
   return st;
 }
 
