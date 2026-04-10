@@ -3,7 +3,7 @@ param(
     [string]$BuildDir = "",
     [string]$QtDir = "C:\Qt\6.11.0\mingw_64",
     [string]$InnoCompiler = "C:\Program Files (x86)\Inno Setup 6\ISCC.exe",
-    [string]$AppVersion = "2.2.0"
+    [string]$AppVersion = "2.2.1"
 )
 
 Set-StrictMode -Version Latest

@@ -16,7 +16,7 @@
 
 ## 当前版本
 
-- 版本：2.2.0
+- 版本：2.2.1
 
 ## 主要功能
 
@@ -158,14 +158,14 @@ RELAY RX: 01 05 00 00 FF 00 8C 3A
 ### 一键打包（PowerShell）
 
 ```powershell
-./scripts/package.ps1 -AppVersion 2.2.0
+./scripts/package.ps1 -AppVersion 2.2.1
 ```
 
 默认输出：
 
 - 应用目录：dist/app
 - 安装包目录：dist/installer
-- 安装包文件：BMS-Setup-2.2.0.exe
+- 安装包文件：BMS-Setup-2.2.1.exe
 
 ## 常见问题
 

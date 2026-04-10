@@ -10,6 +10,7 @@
 #include <QPointF>
 #include <QPointer>
 #include <QRegularExpression>
+#include <QSet>
 #include <QStringList>
 #include <QVector>
 
@@ -62,6 +63,7 @@ class ADS1256Controller : public QObject {
     Q_PROPERTY(QString cyclePhaseText READ cyclePhaseText NOTIFY cycleLoopChanged)
     Q_PROPERTY(int cycleCompletedCount READ cycleCompletedCount NOTIFY cycleLoopChanged)
     Q_PROPERTY(bool cycleOverlayVisible READ cycleOverlayVisible NOTIFY cycleLoopChanged)
+    Q_PROPERTY(QStringList cycleCurveLabels READ cycleCurveLabels NOTIFY cycleLoopChanged)
     Q_PROPERTY(double cycleDischargeEndVoltage READ cycleDischargeEndVoltage WRITE setCycleDischargeEndVoltage NOTIFY cycleConfigChanged)
     Q_PROPERTY(double cycleChargeEndVoltage READ cycleChargeEndVoltage WRITE setCycleChargeEndVoltage NOTIFY cycleConfigChanged)
     Q_PROPERTY(int cycleConfirmSamples READ cycleConfirmSamples WRITE setCycleConfirmSamples NOTIFY cycleConfigChanged)
@@ -109,6 +111,7 @@ public:
     QString cyclePhaseText() const;
     int cycleCompletedCount() const;
     bool cycleOverlayVisible() const;
+    QStringList cycleCurveLabels() const;
     double cycleDischargeEndVoltage() const;
     double cycleChargeEndVoltage() const;
     int cycleConfirmSamples() const;
@@ -176,6 +179,12 @@ public:
         QObject *cycle5,
         QObject *cycle6,
         QObject *cycle7);
+    Q_INVOKABLE void clearCycleSeriesBindings();
+    Q_INVOKABLE void registerCycleSeries(QObject *series);
+    Q_INVOKABLE int cycleRenderSeriesCount() const;
+    Q_INVOKABLE int cycleCurveIdAt(int index) const;
+    Q_INVOKABLE bool isCycleCurveVisible(int cycleIndex) const;
+    Q_INVOKABLE void setCycleCurveVisible(int cycleIndex, bool visible);
 
     Q_INVOKABLE void startCycleLoop();
     Q_INVOKABLE void stopCycleLoop();
@@ -234,6 +243,7 @@ private:
     void clearCycleOverlay();
     void beginCycleTrace(qint64 nowNs);
     void appendCyclePoint(double elapsedSeconds, double voltage);
+    void compactCycleTrace(int traceIndex);
     void evaluateCycleTransition(double voltage, qint64 nowNs);
     void switchCyclePhase(bool toCharge, qint64 nowNs);
     void applyRelayState(bool chargeOn, bool dischargeOn);
@@ -256,6 +266,8 @@ private:
 
     struct CycleTrace {
         int cycleIndex = 0;
+        int overviewStep = 1;
+        qint64 sampleSeq = 0;
         std::deque<double> t;
         std::deque<double> v;
     };
@@ -353,6 +365,7 @@ private:
     int m_cycleConfirmSamples = 8;
     int m_cycleMaxCount = 0;
     QVector<CycleTrace> m_cycleTraces;
+    QSet<int> m_hiddenCycleCurveIds;
     quint32 m_relayApplySeq = 0;
 
     QString m_storageDir;

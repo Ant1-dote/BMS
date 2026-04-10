@@ -100,6 +100,8 @@ ApplicationWindow {
     property var channelNames: ["AIN0", "AIN1", "AIN2", "AIN3", "AIN4", "AIN5", "AIN6", "AIN7", "AINCOM"]
     property var pgaValues: [1, 2, 4, 8, 16, 32, 64]
     property var channelColors: ["#ff9e58", "#00c2a8", "#4ea1ff", "#f06b8f", "#f8bb39", "#9f7aea", "#5ec2ff", "#ff6b6b"]
+    property var cycleColors: ["#ff5c5c", "#ff9f43", "#f6c445", "#26c281", "#2d98da", "#6c5ce7", "#e667af", "#00b894", "#ff7675", "#fdcb6e", "#55efc4", "#74b9ff"]
+    property var cycleSeriesRefs: []
     property var scanSampleFlags: [true, true, true, true, true, true, true, true]
     property var scanVisibleFlags: [true, true, true, true, true, true, true, true]
     property bool multiMode: controller.acqMode !== "SINGLE"
@@ -1427,15 +1429,14 @@ ApplicationWindow {
                 SectionCard {
                     id: scanSection
                     title: "05 多通道采样与显示"
-                    enabled: root.multiMode
 
                     GridLayout {
                         x: root.cSectionContentPad
                         y: root.cSectionContentPad
                         width: parent.width - root.cSectionContentPad * 2
                         visible: height > 0.5 || opacity > 0.01
-                        enabled: !scanSection.collapsed
-                        opacity: scanSection.collapsed ? 0.0 : 1.0
+                        enabled: !scanSection.collapsed && root.multiMode
+                        opacity: scanSection.collapsed ? 0.0 : (root.multiMode ? 1.0 : 0.55)
                         height: scanSection.collapsed ? 0 : implicitHeight
                         clip: true
                         columns: root.layoutScanVisibleColumns
@@ -1669,10 +1670,9 @@ ApplicationWindow {
                             property real startY: 0
                             function zoomMapSeries() {
                                 if (!root.multiMode) {
-                                    const cycleSeries = [cycle0, cycle1, cycle2, cycle3, cycle4, cycle5, cycle6, cycle7]
-                                    for (let i = 0; i < cycleSeries.length; ++i) {
-                                        if (cycleSeries[i] && cycleSeries[i].visible) {
-                                            return cycleSeries[i]
+                                    for (let i = 0; i < root.cycleSeriesRefs.length; ++i) {
+                                        if (root.cycleSeriesRefs[i] && root.cycleSeriesRefs[i].visible) {
+                                            return root.cycleSeriesRefs[i]
                                         }
                                     }
                                     return singleSeries
@@ -1750,15 +1750,6 @@ ApplicationWindow {
                                     name: "Filtered"
                                 }
 
-                                LineSeries { id: cycle0; axisX: axisX; axisY: axisY; color: "#ff5c5c"; width: 2.1; visible: false; name: "Cycle 1" }
-                                LineSeries { id: cycle1; axisX: axisX; axisY: axisY; color: "#ff9f43"; width: 2.1; visible: false; name: "Cycle 2" }
-                                LineSeries { id: cycle2; axisX: axisX; axisY: axisY; color: "#f6c445"; width: 2.1; visible: false; name: "Cycle 3" }
-                                LineSeries { id: cycle3; axisX: axisX; axisY: axisY; color: "#26c281"; width: 2.1; visible: false; name: "Cycle 4" }
-                                LineSeries { id: cycle4; axisX: axisX; axisY: axisY; color: "#2d98da"; width: 2.1; visible: false; name: "Cycle 5" }
-                                LineSeries { id: cycle5; axisX: axisX; axisY: axisY; color: "#6c5ce7"; width: 2.1; visible: false; name: "Cycle 6" }
-                                LineSeries { id: cycle6; axisX: axisX; axisY: axisY; color: "#e667af"; width: 2.1; visible: false; name: "Cycle 7" }
-                                LineSeries { id: cycle7; axisX: axisX; axisY: axisY; color: "#00b894"; width: 2.1; visible: false; name: "Cycle 8" }
-
                                 LineSeries { id: ch0; axisX: axisX; axisY: axisY; color: channelColors[0]; name: "AIN0" }
                                 LineSeries { id: ch1; axisX: axisX; axisY: axisY; color: channelColors[1]; name: "AIN1" }
                                 LineSeries { id: ch2; axisX: axisX; axisY: axisY; color: channelColors[2]; name: "AIN2" }
@@ -1781,15 +1772,20 @@ ApplicationWindow {
                                         ch6,
                                         ch7)
 
-                                    controller.attachCycleSeries(
-                                        cycle0,
-                                        cycle1,
-                                        cycle2,
-                                        cycle3,
-                                        cycle4,
-                                        cycle5,
-                                        cycle6,
-                                        cycle7)
+                                    controller.clearCycleSeriesBindings()
+                                    root.cycleSeriesRefs = []
+                                    const cycleSeriesCount = controller.cycleRenderSeriesCount()
+                                    for (let i = 0; i < cycleSeriesCount; ++i) {
+                                        const series = chartView.createSeries(ChartView.SeriesTypeLine, "Cycle " + (i + 1), axisX, axisY)
+                                        if (!series) {
+                                            continue
+                                        }
+                                        series.width = 2.0
+                                        series.color = root.cycleColors[i % root.cycleColors.length]
+                                        series.visible = false
+                                        root.cycleSeriesRefs.push(series)
+                                        controller.registerCycleSeries(series)
+                                    }
                                 }
                             }
 
@@ -1868,6 +1864,65 @@ ApplicationWindow {
                                 border.color: "#3a76d4"
                                 border.width: 1
                                 radius: 2
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    visible: controller.cycleOverlayVisible
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: visible ? 98 : 0
+                    color: root.cCard
+                    radius: 10
+                    border.color: root.cPanelBorder
+                    border.width: 1
+                    clip: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 6
+
+                        Label {
+                            text: "循环曲线显示控制"
+                            color: root.cTitle
+                            font.pixelSize: 12
+                            font.bold: true
+                        }
+
+                        Flickable {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            contentWidth: width
+                            contentHeight: cycleToggleFlow.implicitHeight
+                            clip: true
+
+                            Flow {
+                                id: cycleToggleFlow
+                                width: parent.width
+                                spacing: 8
+
+                                Repeater {
+                                    model: controller.cycleCurveLabels
+
+                                    delegate: FluentCheckBox {
+                                        required property int index
+                                        required property string modelData
+
+                                        text: modelData
+                                        checked: {
+                                            const cycleId = controller.cycleCurveIdAt(index)
+                                            return cycleId < 0 ? true : controller.isCycleCurveVisible(cycleId)
+                                        }
+                                        onToggled: {
+                                            const cycleId = controller.cycleCurveIdAt(index)
+                                            if (cycleId >= 0) {
+                                                controller.setCycleCurveVisible(cycleId, checked)
+                                            }
+                                        }
+                                    }
+                                }
                             }
                         }
                     }

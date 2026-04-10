@@ -41,7 +41,8 @@ constexpr double kAutoYClipRatio = 0.01;
 constexpr double kHourAxisThresholdSeconds = 3600.0;
 constexpr double kLatestDataXAxisRatio = 0.7;
 constexpr qint64 kZoomCsvMaxRows = 2'000'000;
-constexpr int kCycleOverlaySeriesCount = 8;
+constexpr int kCycleRenderSeriesCount = 64;
+constexpr int kCycleRetainMaxCount = 512;
 constexpr qint64 kCycleMinPhaseDurationNs = 3'000'000'000;
 
 QString shortDescription(const QString &text)
@@ -495,7 +496,7 @@ ADS1256Controller::ADS1256Controller(QObject *parent)
     , m_vScan(8)
     , m_scanVisible(8, true)
     , m_scanSeries(8)
-    , m_cycleSeries(kCycleOverlaySeriesCount)
+    , m_cycleSeries(kCycleRenderSeriesCount)
     , m_zoomScanPoints(8)
     , m_adPattern(QStringLiteral(R"(AD\s*:\s*(-?\d+))"), QRegularExpression::CaseInsensitiveOption)
     , m_ad8Pattern(QStringLiteral(R"(AD8\s*:\s*(-?\d+(?:\s*,\s*-?\d+){7}))"), QRegularExpression::CaseInsensitiveOption)
@@ -698,6 +699,18 @@ bool ADS1256Controller::cycleOverlayVisible() const
     return !m_cycleTraces.isEmpty();
 }
 
+QStringList ADS1256Controller::cycleCurveLabels() const
+{
+    QStringList labels;
+    const int visibleCount = qMin(m_cycleSeries.size(), m_cycleTraces.size());
+    const int firstTraceIndex = qMax(0, m_cycleTraces.size() - visibleCount);
+    labels.reserve(visibleCount);
+    for (int i = 0; i < visibleCount; ++i) {
+        labels.push_back(QStringLiteral("Cycle %1").arg(m_cycleTraces.at(firstTraceIndex + i).cycleIndex));
+    }
+    return labels;
+}
+
 double ADS1256Controller::cycleDischargeEndVoltage() const
 {
     return m_cycleDischargeEndVoltage;
@@ -716,6 +729,51 @@ int ADS1256Controller::cycleConfirmSamples() const
 int ADS1256Controller::cycleMaxCount() const
 {
     return m_cycleMaxCount;
+}
+
+int ADS1256Controller::cycleRenderSeriesCount() const
+{
+    return m_cycleSeries.size();
+}
+
+int ADS1256Controller::cycleCurveIdAt(int index) const
+{
+    const int visibleCount = qMin(m_cycleSeries.size(), m_cycleTraces.size());
+    if (index < 0 || index >= visibleCount) {
+        return -1;
+    }
+
+    const int firstTraceIndex = qMax(0, m_cycleTraces.size() - visibleCount);
+    return m_cycleTraces.at(firstTraceIndex + index).cycleIndex;
+}
+
+bool ADS1256Controller::isCycleCurveVisible(int cycleIndex) const
+{
+    if (cycleIndex <= 0) {
+        return true;
+    }
+    return !m_hiddenCycleCurveIds.contains(cycleIndex);
+}
+
+void ADS1256Controller::setCycleCurveVisible(int cycleIndex, bool visible)
+{
+    if (cycleIndex <= 0) {
+        return;
+    }
+
+    const bool currentlyVisible = !m_hiddenCycleCurveIds.contains(cycleIndex);
+    if (currentlyVisible == visible) {
+        return;
+    }
+
+    if (visible) {
+        m_hiddenCycleCurveIds.remove(cycleIndex);
+    } else {
+        m_hiddenCycleCurveIds.insert(cycleIndex);
+    }
+
+    emit cycleLoopChanged();
+    updatePlot(true);
 }
 
 QAbstractListModel *ADS1256Controller::logModel()
@@ -1341,6 +1399,11 @@ void ADS1256Controller::attachCycleSeries(
 {
     const QVector<QObject *> cycleObjects { cycle0, cycle1, cycle2, cycle3, cycle4, cycle5, cycle6, cycle7 };
     for (int i = 0; i < m_cycleSeries.size(); ++i) {
+        m_cycleSeries[i] = nullptr;
+    }
+
+    const int bindCount = qMin(m_cycleSeries.size(), cycleObjects.size());
+    for (int i = 0; i < bindCount; ++i) {
         m_cycleSeries[i] = qobject_cast<QXYSeries *>(cycleObjects.at(i));
         if (m_cycleSeries[i]) {
             m_cycleSeries[i]->clear();
@@ -1349,6 +1412,36 @@ void ADS1256Controller::attachCycleSeries(
     }
 
     updatePlot(true);
+}
+
+void ADS1256Controller::clearCycleSeriesBindings()
+{
+    for (int i = 0; i < m_cycleSeries.size(); ++i) {
+        if (m_cycleSeries[i]) {
+            m_cycleSeries[i]->clear();
+            m_cycleSeries[i]->setVisible(false);
+        }
+        m_cycleSeries[i] = nullptr;
+    }
+}
+
+void ADS1256Controller::registerCycleSeries(QObject *series)
+{
+    QXYSeries *xySeries = qobject_cast<QXYSeries *>(series);
+    if (!xySeries) {
+        return;
+    }
+
+    for (int i = 0; i < m_cycleSeries.size(); ++i) {
+        if (!m_cycleSeries[i]) {
+            m_cycleSeries[i] = xySeries;
+            m_cycleSeries[i]->clear();
+            m_cycleSeries[i]->setVisible(false);
+            return;
+        }
+    }
+
+    appendLog(QStringLiteral("error"), QStringLiteral("循环渲染系列槽位不足，额外系列将被忽略"), false);
 }
 
 void ADS1256Controller::startCycleLoop()
@@ -1412,6 +1505,7 @@ void ADS1256Controller::stopCycleLoop()
 void ADS1256Controller::clearCycleOverlay()
 {
     m_cycleTraces.clear();
+    m_hiddenCycleCurveIds.clear();
     m_cycleCompletedCount = 0;
     m_cycleTraceSeed = 0;
     m_cycleStartNs = 0;
@@ -1435,7 +1529,8 @@ void ADS1256Controller::beginCycleTrace(qint64 nowNs)
     CycleTrace trace;
     trace.cycleIndex = ++m_cycleTraceSeed;
     m_cycleTraces.push_back(trace);
-    while (m_cycleTraces.size() > kCycleOverlaySeriesCount) {
+    while (m_cycleTraces.size() > kCycleRetainMaxCount) {
+        m_hiddenCycleCurveIds.remove(m_cycleTraces.first().cycleIndex);
         m_cycleTraces.removeFirst();
     }
 
@@ -1452,12 +1547,57 @@ void ADS1256Controller::appendCyclePoint(double elapsedSeconds, double voltage)
     }
 
     CycleTrace &trace = m_cycleTraces.last();
+    ++trace.sampleSeq;
+    const qint64 step = qMax<qint64>(1, trace.overviewStep);
+    if (!trace.t.empty() && (trace.sampleSeq % step) != 0) {
+        return;
+    }
+
     trace.t.push_back(elapsedSeconds);
     trace.v.push_back(voltage);
-    if (trace.t.size() > static_cast<size_t>(m_plotBufferMax)) {
-        trace.t.pop_front();
-        trace.v.pop_front();
+
+    const int traceIndex = m_cycleTraces.size() - 1;
+    while (!m_cycleTraces.isEmpty()
+           && traceIndex >= 0
+           && traceIndex < m_cycleTraces.size()
+           && static_cast<int>(m_cycleTraces[traceIndex].t.size()) > m_plotBufferMax) {
+        const int beforeCount = static_cast<int>(m_cycleTraces[traceIndex].t.size());
+        compactCycleTrace(traceIndex);
+        const int afterCount = static_cast<int>(m_cycleTraces[traceIndex].t.size());
+        if (afterCount >= beforeCount) {
+            break;
+        }
     }
+}
+
+void ADS1256Controller::compactCycleTrace(int traceIndex)
+{
+    if (traceIndex < 0 || traceIndex >= m_cycleTraces.size()) {
+        return;
+    }
+
+    CycleTrace &trace = m_cycleTraces[traceIndex];
+    const int count = qMin(static_cast<int>(trace.t.size()), static_cast<int>(trace.v.size()));
+    if (count <= 1) {
+        return;
+    }
+
+    std::deque<double> t;
+    std::deque<double> v;
+    for (int i = 0; i < count; i += 2) {
+        t.push_back(trace.t[i]);
+        v.push_back(trace.v[i]);
+    }
+
+    if (((count - 1) % 2) != 0) {
+        t.push_back(trace.t[count - 1]);
+        v.push_back(trace.v[count - 1]);
+    }
+
+    trace.t.swap(t);
+    trace.v.swap(v);
+    const qint64 nextStep = static_cast<qint64>(trace.overviewStep) * 2;
+    trace.overviewStep = static_cast<int>(qMin(nextStep, static_cast<qint64>(std::numeric_limits<int>::max())));
 }
 
 void ADS1256Controller::evaluateCycleTransition(double voltage, qint64 nowNs)
@@ -2883,6 +3023,13 @@ void ADS1256Controller::updatePlot(bool force)
     m_lastPlotUpdateNs = nowNs;
 
     if (m_acqMode == QStringLiteral("SCAN8")) {
+        for (const auto &series : m_cycleSeries) {
+            if (series) {
+                series->clear();
+                series->setVisible(false);
+            }
+        }
+
         bool hasZoomScanData = false;
         if (m_zoomActive && m_zoomCacheReady) {
             for (const QList<QPointF> &series : std::as_const(m_zoomScanPoints)) {
@@ -2940,9 +3087,9 @@ void ADS1256Controller::updatePlot(bool force)
                 continue;
             }
 
-            m_scanSeries[ch]->setVisible(m_scanVisible[ch]);
             if (!m_scanVisible[ch]) {
                 m_scanSeries[ch]->clear();
+                m_scanSeries[ch]->setVisible(false);
                 continue;
             }
 
@@ -2954,6 +3101,7 @@ void ADS1256Controller::updatePlot(bool force)
                     pickPlotPoints(m_tScan, m_vScan[ch], xMin, xMax, m_zoomActive, scanTargetPoints),
                     xScale);
             }
+            m_scanSeries[ch]->setVisible(true);
             m_scanSeries[ch]->replace(points);
             if (hasVisibleDataPoints(points)) {
                 const QVector<double> yPart = extractY(points);
@@ -2963,9 +3111,11 @@ void ADS1256Controller::updatePlot(bool force)
 
         if (m_singleShadowSeries) {
             m_singleShadowSeries->clear();
+            m_singleShadowSeries->setVisible(false);
         }
         if (m_singleSeries) {
             m_singleSeries->clear();
+            m_singleSeries->setVisible(false);
         }
 
         const auto [yMin, yMax] = m_zoomActive
@@ -2980,13 +3130,16 @@ void ADS1256Controller::updatePlot(bool force)
         for (int ch = 0; ch < 8; ++ch) {
             if (m_scanSeries[ch]) {
                 m_scanSeries[ch]->clear();
+                m_scanSeries[ch]->setVisible(false);
             }
         }
         if (m_singleShadowSeries) {
             m_singleShadowSeries->clear();
+            m_singleShadowSeries->setVisible(false);
         }
         if (m_singleSeries) {
             m_singleSeries->clear();
+            m_singleSeries->setVisible(false);
         }
 
         double dataRight = 0.0;
@@ -3031,9 +3184,11 @@ void ADS1256Controller::updatePlot(bool force)
                 xScale);
             series->replace(points);
             series->setName(QStringLiteral("Cycle %1").arg(trace.cycleIndex));
-            series->setVisible(true);
+            const bool userVisible = !m_hiddenCycleCurveIds.contains(trace.cycleIndex);
+            const bool shouldShow = userVisible && !points.isEmpty();
+            series->setVisible(shouldShow);
 
-            if (!points.isEmpty()) {
+            if (shouldShow) {
                 yVisible += extractY(points);
             }
         }
@@ -3064,6 +3219,7 @@ void ADS1256Controller::updatePlot(bool force)
     for (int ch = 0; ch < 8; ++ch) {
         if (m_scanSeries[ch]) {
             m_scanSeries[ch]->clear();
+            m_scanSeries[ch]->setVisible(false);
         }
     }
 
@@ -3088,17 +3244,10 @@ void ADS1256Controller::updatePlot(bool force)
     const bool axisUnitChanged = (m_axisXInHours != useHourAxis);
     m_axisXInHours = useHourAxis;
 
-    QList<QPointF> rawPoints;
     QList<QPointF> filtPoints;
     if (hasZoomSingleData) {
-        rawPoints = scalePointsX(
-            m_zoomSingleRawPoints.isEmpty() ? m_zoomSinglePoints : m_zoomSingleRawPoints,
-            xScale);
         filtPoints = scalePointsX(m_zoomSinglePoints, xScale);
     } else {
-        rawPoints = scalePointsX(
-            pickPlotPoints(m_tSingle, m_vSingleRaw, xMin, xMax, m_zoomActive),
-            xScale);
         filtPoints = scalePointsX(
             pickPlotPoints(m_tSingle, m_vSingle, xMin, xMax, m_zoomActive),
             xScale);
@@ -3107,9 +3256,12 @@ void ADS1256Controller::updatePlot(bool force)
     const QVector<double> yVisible = extractY(filtPoints);
 
     if (m_singleShadowSeries) {
-        m_singleShadowSeries->replace(rawPoints);
+        m_singleShadowSeries->clear();
+        m_singleShadowSeries->setVisible(false);
     }
     if (m_singleSeries) {
+        m_singleSeries->setVisible(true);
+        m_singleSeries->setName(QStringLiteral("AIN%1").arg(singleChannelIndex()));
         m_singleSeries->replace(filtPoints);
     }
 
@@ -3123,13 +3275,16 @@ void ADS1256Controller::clearSeries()
 {
     if (m_singleShadowSeries) {
         m_singleShadowSeries->clear();
+        m_singleShadowSeries->setVisible(false);
     }
     if (m_singleSeries) {
         m_singleSeries->clear();
+        m_singleSeries->setVisible(false);
     }
     for (const auto &series : m_scanSeries) {
         if (series) {
             series->clear();
+            series->setVisible(false);
         }
     }
     for (const auto &series : m_cycleSeries) {
