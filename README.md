@@ -32,16 +32,13 @@
 
 ## 目录结构
 
-- main.cpp: Qt 应用入口
-- Main.qml: 主界面
-- ads1256controller.cpp / ads1256controller.h: 上位机业务控制器
-- logdatabase.cpp / logdatabase.h: 日志与采样数据库接口
-- loglistmodel.cpp / loglistmodel.h: 日志列表模型
-- samplesqlwriter.cpp / samplesqlwriter.h: 异步 SQL 写入
-- crashlogger.cpp / crashlogger.h: 崩溃日志记录
-- stm32.c: STM32 侧 ADS1256 + Modbus 继电器控制示例
+- src: C++ 源文件（main、控制器、数据库、日志等）
+- include: C++ 头文件（控制器、数据库、EKF、日志等）
+- qml: QML 界面文件
+- app_icon.rc: Windows 可执行文件图标资源
+- firmware: STM32 侧联调示例代码
 - assets/icons: 应用图标资源
-- scripts/package.ps1: 一键打包脚本
+- scripts: 构建与打包脚本
 - installer/BMS.iss: Inno Setup 打包脚本
 
 ## 环境要求
@@ -118,7 +115,7 @@ cmake --build build
 
 ## STM32 固件侧说明
 
-stm32.c 提供 ADS1256 采样与串口命令解析，并支持通过 USART2 对继电器板发送 Modbus RTU 写单线圈命令。
+firmware/stm32.c 提供 ADS1256 采样与串口命令解析，并支持通过 USART2 对继电器板发送 Modbus RTU 写单线圈命令。
 
 ### 常用命令示例
 

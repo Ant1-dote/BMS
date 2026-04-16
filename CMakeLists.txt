@@ -9,8 +9,34 @@ set(APP_ICON_ICO "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/bms_app.ico")
 set(APP_ICON_RESOURCE_WINDOWS "")
 set(APP_ICON_QRC "")
 
+set(BMS_ENABLE_WIN_RC_ICON_DEFAULT ON)
+if(MINGW)
+    set(BMS_ENABLE_WIN_RC_ICON_DEFAULT OFF)
+endif()
+option(BMS_ENABLE_WIN_RC_ICON "Enable Windows RC icon embedding" ${BMS_ENABLE_WIN_RC_ICON_DEFAULT})
+
+set(APP_SOURCES
+    src/main.cpp
+    src/ads1256controller.cpp
+    src/logdatabase.cpp
+    src/loglistmodel.cpp
+    src/samplesqlwriter.cpp
+    src/crashlogger.cpp
+)
+
+set(APP_HEADERS
+    include/ads1256controller.h
+    include/logdatabase.h
+    include/loglistmodel.h
+    include/samplesqlwriter.h
+    include/crashlogger.h
+    include/scalarekf.h
+)
+
 if(WIN32 AND EXISTS "${APP_ICON_ICO}")
-    set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/app_icon.rc")
+    if(BMS_ENABLE_WIN_RC_ICON)
+        set(APP_ICON_RESOURCE_WINDOWS "${CMAKE_CURRENT_SOURCE_DIR}/app_icon.rc")
+    endif()
     set(APP_ICON_QRC "${CMAKE_CURRENT_SOURCE_DIR}/assets/icons/icons.qrc")
 endif()
 
@@ -19,18 +45,8 @@ find_package(Qt6 REQUIRED COMPONENTS Quick QuickDialogs2 SerialPort Sql Charts W
 qt_standard_project_setup(REQUIRES 6.10)
 
 qt_add_executable(appBMS
-    main.cpp
-    ads1256controller.cpp
-    ads1256controller.h
-    logdatabase.cpp
-    logdatabase.h
-    loglistmodel.cpp
-    loglistmodel.h
-    samplesqlwriter.cpp
-    samplesqlwriter.h
-    crashlogger.cpp
-    crashlogger.h
-    scalarekf.h
+    ${APP_SOURCES}
+    ${APP_HEADERS}
     ${APP_ICON_RESOURCE_WINDOWS}
     ${APP_ICON_QRC}
 )
@@ -38,7 +54,7 @@ qt_add_executable(appBMS
 qt_add_qml_module(appBMS
     URI BMS
     QML_FILES
-        Main.qml
+        qml/Main.qml
 )
 
 # Qt for iOS sets MACOSX_BUNDLE_GUI_IDENTIFIER automatically since Qt 6.1.
@@ -60,6 +76,11 @@ target_link_libraries(appBMS
         Qt6::Sql
         Qt6::Charts
         Qt6::Widgets
+)
+
+target_include_directories(appBMS
+    PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
 )
 
 install(TARGETS appBMS
