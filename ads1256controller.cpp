@@ -44,6 +44,8 @@ constexpr qint64 kZoomCsvMaxRows = 2'000'000;
 constexpr int kCycleRenderSeriesCount = 64;
 constexpr int kCycleRetainMaxCount = 512;
 constexpr qint64 kCycleMinPhaseDurationNs = 3'000'000'000;
+constexpr int kCycleSwitchDelayMs = 5000;
+constexpr int kCycleSwitchDelaySeconds = kCycleSwitchDelayMs / 1000;
 
 QString shortDescription(const QString &text)
 {
@@ -1477,6 +1479,8 @@ void ADS1256Controller::startCycleLoop()
     }
 
     clearCycleOverlay();
+    ++m_cyclePhaseSwitchSeq;
+    m_cycleRelayTransitionPending = false;
     m_cycleLoopEnabled = true;
     m_cyclePhase = CyclePhase::Discharge;
     m_cyclePhaseText = cyclePhaseLabel(false);
@@ -1605,6 +1609,9 @@ void ADS1256Controller::evaluateCycleTransition(double voltage, qint64 nowNs)
     if (!m_cycleLoopEnabled || m_cyclePhase == CyclePhase::Idle) {
         return;
     }
+    if (m_cycleRelayTransitionPending) {
+        return;
+    }
 
     if (m_cyclePhaseStartNs <= 0) {
         m_cyclePhaseStartNs = nowNs;
@@ -1656,14 +1663,63 @@ void ADS1256Controller::switchCyclePhase(bool toCharge, qint64 nowNs)
     m_cyclePhaseText = cyclePhaseLabel(toCharge);
     m_cyclePhaseStartNs = nowNs;
     m_cycleConsecutiveMatches = 0;
+    m_cycleRelayTransitionPending = true;
 
-    if (toCharge) {
-        applyRelayState(true, false);
-        appendLog(QStringLiteral("info"), QStringLiteral("放电终点触发，切换到充电阶段"), false);
-    } else {
-        applyRelayState(false, true);
-        appendLog(QStringLiteral("info"), QStringLiteral("充电终点触发，切换到放电阶段"), false);
-    }
+    const QString stopCmd = toCharge ? QStringLiteral("RELAY 2 OFF") : QStringLiteral("RELAY 1 ON");
+    const QString startCmd = toCharge ? QStringLiteral("RELAY 1 OFF") : QStringLiteral("RELAY 2 ON");
+    const QString stopPhase = toCharge ? QStringLiteral("放电") : QStringLiteral("充电");
+    const QString startPhase = toCharge ? QStringLiteral("充电") : QStringLiteral("放电");
+
+    const quint32 switchSeq = ++m_cyclePhaseSwitchSeq;
+    sendLine(stopCmd);
+
+    // 补一轮停止命令重试，处理偶发丢帧。
+    QTimer::singleShot(220, this, [this, switchSeq, stopCmd]() {
+        if (switchSeq != m_cyclePhaseSwitchSeq || !m_serial || !m_serial->isOpen()) {
+            return;
+        }
+        sendLine(stopCmd);
+    });
+
+    appendLog(
+        QStringLiteral("info"),
+        QStringLiteral("%1终点触发，已停止%1，%2秒后切换到%3阶段")
+            .arg(stopPhase)
+            .arg(kCycleSwitchDelaySeconds)
+            .arg(startPhase),
+        false);
+
+    QTimer::singleShot(kCycleSwitchDelayMs, this, [this, switchSeq, toCharge, startCmd]() {
+        if (switchSeq != m_cyclePhaseSwitchSeq) {
+            return;
+        }
+        if (!m_cycleLoopEnabled || m_cyclePhase == CyclePhase::Idle) {
+            return;
+        }
+        if ((toCharge && m_cyclePhase != CyclePhase::Charge)
+            || (!toCharge && m_cyclePhase != CyclePhase::Discharge)) {
+            return;
+        }
+
+        sendLine(startCmd);
+
+        // 补一轮启动命令重试，处理偶发丢帧。
+        QTimer::singleShot(220, this, [this, switchSeq, startCmd]() {
+            if (switchSeq != m_cyclePhaseSwitchSeq || !m_serial || !m_serial->isOpen()) {
+                return;
+            }
+            sendLine(startCmd);
+        });
+
+        m_cyclePhaseStartNs = QDateTime::currentMSecsSinceEpoch() * 1'000'000;
+        m_cycleConsecutiveMatches = 0;
+        m_cycleRelayTransitionPending = false;
+        appendLog(
+            QStringLiteral("info"),
+            toCharge ? QStringLiteral("已进入充电阶段") : QStringLiteral("已进入放电阶段"),
+            false);
+        emit cycleLoopChanged();
+    });
 
     emit cycleLoopChanged();
 }
@@ -1675,48 +1731,28 @@ void ADS1256Controller::applyRelayState(bool chargeOn, bool dischargeOn)
     }
 
     const quint32 seq = ++m_relayApplySeq;
+    // 继电器 1 为低电平有效：OFF=充电开启，ON=充电关闭。
+    const QString relay1Cmd = QStringLiteral("RELAY 1 %1")
+        .arg(chargeOn ? QStringLiteral("OFF") : QStringLiteral("ON"));
+    const QString relay2Cmd = QStringLiteral("RELAY 2 %1")
+        .arg(dischargeOn ? QStringLiteral("ON") : QStringLiteral("OFF"));
 
-    // 先统一断开，再按目标状态逐路开启，减少串口连发时的误动作概率。
-    sendLine(QStringLiteral("RELAY ALL OFF"));
+    sendLine(relay1Cmd);
 
-    int delayMs = 90;
-    if (chargeOn) {
-        QTimer::singleShot(delayMs, this, [this, seq]() {
-            if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
-                return;
-            }
-            sendLine(QStringLiteral("RELAY 1 ON"));
-        });
-        delayMs += 90;
-    }
-
-    if (dischargeOn) {
-        QTimer::singleShot(delayMs, this, [this, seq]() {
-            if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
-                return;
-            }
-            sendLine(QStringLiteral("RELAY 2 ON"));
-        });
-        delayMs += 90;
-    }
-
-    // 补一轮重试，处理偶发丢帧或下位机忙导致的未执行。
-    QTimer::singleShot(delayMs + 220, this, [this, seq, chargeOn, dischargeOn]() {
+    QTimer::singleShot(90, this, [this, seq, relay2Cmd]() {
         if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
             return;
         }
+        sendLine(relay2Cmd);
+    });
 
-        if (!chargeOn && !dischargeOn) {
-            sendLine(QStringLiteral("RELAY ALL OFF"));
+    // 补一轮重试，处理偶发丢帧或下位机忙导致的未执行。
+    QTimer::singleShot(360, this, [this, seq, relay1Cmd, relay2Cmd]() {
+        if (seq != m_relayApplySeq || !m_serial || !m_serial->isOpen()) {
             return;
         }
-
-        if (chargeOn) {
-            sendLine(QStringLiteral("RELAY 1 ON"));
-        }
-        if (dischargeOn) {
-            sendLine(QStringLiteral("RELAY 2 ON"));
-        }
+        sendLine(relay1Cmd);
+        sendLine(relay2Cmd);
     });
 }
 
@@ -1731,6 +1767,8 @@ void ADS1256Controller::stopCycleLoopInternal(bool powerOffRelays, bool complete
     m_cyclePhaseText = completed ? QStringLiteral("循环完成") : QStringLiteral("空闲");
     m_cycleConsecutiveMatches = 0;
     m_cyclePhaseStartNs = 0;
+    m_cycleRelayTransitionPending = false;
+    ++m_cyclePhaseSwitchSeq;
 
     if (powerOffRelays) {
         applyRelayState(false, false);

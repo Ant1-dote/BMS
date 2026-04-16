@@ -1370,7 +1370,7 @@ ApplicationWindow {
                                     enabled: controller.connected && !controller.cycleLoopEnabled
                                     text: checked ? "开启" : "关闭"
                                     onClicked: {
-                                        controller.sendCommand("RELAY 1 " + (checked ? "ON" : "OFF"))
+                                        controller.sendCommand("RELAY 1 " + (checked ? "OFF" : "ON"))
                                     }
                                 }
 
@@ -1397,7 +1397,8 @@ ApplicationWindow {
                                     onClicked: {
                                         relayChargeSwitch.checked = false
                                         relayDischargeSwitch.checked = false
-                                        controller.sendCommand("RELAY ALL OFF")
+                                        controller.sendCommand("RELAY 1 ON")
+                                        controller.sendCommand("RELAY 2 OFF")
                                     }
                                 }
                             }

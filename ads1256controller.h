@@ -367,6 +367,8 @@ private:
     QVector<CycleTrace> m_cycleTraces;
     QSet<int> m_hiddenCycleCurveIds;
     quint32 m_relayApplySeq = 0;
+    quint32 m_cyclePhaseSwitchSeq = 0;
+    bool m_cycleRelayTransitionPending = false;
 
     QString m_storageDir;
     QString m_logDbPath;
