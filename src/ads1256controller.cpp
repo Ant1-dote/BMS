@@ -5,6 +5,7 @@
 
 #include <QDateTime>
 #include <QDir>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QFileDialog>
 #include <QFileInfo>
@@ -31,11 +32,14 @@ constexpr int kRenderTargetPointsScanMin = 240;
 constexpr int kRenderTargetPointsScanBudget = 3200;
 constexpr int kMaxLoadLogRows = 5000;
 constexpr int kMaxLoadSampleRows = 0;
-constexpr int kSqlBufferFlushCount = 256;
+constexpr int kSqlBufferFlushCount = 2048;
 constexpr int kMaxPendingSamples = 200000;
-constexpr int kCsvFlushInterval = 32;
+constexpr int kCsvFlushInterval = 512;
+constexpr int kCsvBufferFlushBytes = 256 * 1024;
 constexpr int kMaxRxBufferBytes = 512 * 1024;
 constexpr int kMaxSerialLineBytes = 16 * 1024;
+constexpr int kSerialDrainMaxLines = 512;
+constexpr qint64 kSerialDrainBudgetMs = 8;
 constexpr qint64 kPlotUpdateIntervalNs = 25'000'000;
 constexpr double kAutoYClipRatio = 0.01;
 constexpr double kHourAxisThresholdSeconds = 3600.0;
@@ -523,6 +527,14 @@ ADS1256Controller::ADS1256Controller(QObject *parent)
         [this](const QString &message) {
             appendLog(QStringLiteral("error"), message, false);
             CrashLogger::log(message);
+        },
+        Qt::QueuedConnection);
+    connect(
+        m_sampleWriter,
+        &SampleSqlWriter::queueDepthChanged,
+        this,
+        [this](int pendingCount) {
+            m_asyncPendingSamples = qMax(0, pendingCount);
         },
         Qt::QueuedConnection);
     m_sampleWriterThread->start();
@@ -1363,6 +1375,20 @@ void ADS1256Controller::resetEkf()
     resetEkfFilters(true);
 }
 
+QVariantMap ADS1256Controller::bufferMetrics() const
+{
+    QVariantMap metrics;
+    metrics.insert(QStringLiteral("rxBytes"), m_rxBuffer.size());
+    metrics.insert(QStringLiteral("rxLimitBytes"), kMaxRxBufferBytes);
+    metrics.insert(QStringLiteral("csvBytes"), m_csvBuffer.size());
+    metrics.insert(QStringLiteral("csvLimitBytes"), kCsvBufferFlushBytes);
+    metrics.insert(QStringLiteral("pendingSamples"), m_pendingSamples.size());
+    metrics.insert(QStringLiteral("pendingLimitSamples"), kMaxPendingSamples);
+    metrics.insert(QStringLiteral("asyncSamples"), m_asyncPendingSamples);
+    metrics.insert(QStringLiteral("asyncLimitSamples"), SampleSqlWriter::maxQueueSize());
+    return metrics;
+}
+
 void ADS1256Controller::attachSeries(
     QObject *singleShadow,
     QObject *single,
@@ -1973,6 +1999,10 @@ bool ADS1256Controller::openCsvForSession()
     }
 
     m_csvFlushCounter = 0;
+    m_csvBuffer.clear();
+    m_csvBuffer.reserve(kCsvBufferFlushBytes);
+    m_csvLastTimestampSecond = -1;
+    m_csvLastTimestampText.clear();
     m_csvWriteHealthy = true;
     return true;
 }
@@ -1980,13 +2010,64 @@ bool ADS1256Controller::openCsvForSession()
 void ADS1256Controller::closeCsvFile()
 {
     if (m_csvFile.isOpen()) {
-        if (!m_csvFile.flush() && m_csvWriteHealthy) {
+        if (!flushCsvBuffer(true) && m_csvWriteHealthy) {
             appendLog(QStringLiteral("error"), QStringLiteral("关闭前刷新 CSV 失败: %1").arg(m_csvPath), false);
             CrashLogger::log(QStringLiteral("CSV final flush failed: %1").arg(m_csvPath));
             m_csvWriteHealthy = false;
         }
         m_csvFile.close();
     }
+    m_csvBuffer.clear();
+    m_csvLastTimestampSecond = -1;
+    m_csvLastTimestampText.clear();
+    m_csvFlushCounter = 0;
+}
+
+bool ADS1256Controller::flushCsvBuffer(bool forceDiskFlush)
+{
+    if (!m_csvFile.isOpen()) {
+        return false;
+    }
+
+    if (!m_csvBuffer.isEmpty()) {
+        const qint64 written = m_csvFile.write(m_csvBuffer);
+        if (written != m_csvBuffer.size()) {
+            if (m_csvWriteHealthy) {
+                appendLog(QStringLiteral("error"), QStringLiteral("写入 CSV 失败: %1").arg(m_csvPath), false);
+                CrashLogger::log(QStringLiteral("CSV write failed: %1").arg(m_csvPath));
+            }
+            m_csvWriteHealthy = false;
+            return false;
+        }
+        m_csvBuffer.clear();
+    }
+
+    if (forceDiskFlush || m_csvFlushCounter >= kCsvFlushInterval) {
+        if (!m_csvFile.flush()) {
+            if (m_csvWriteHealthy) {
+                appendLog(QStringLiteral("error"), QStringLiteral("刷新 CSV 失败: %1").arg(m_csvPath), false);
+                CrashLogger::log(QStringLiteral("CSV flush failed: %1").arg(m_csvPath));
+            }
+            m_csvWriteHealthy = false;
+            return false;
+        }
+        m_csvFlushCounter = 0;
+    }
+
+    return true;
+}
+
+QString ADS1256Controller::csvTimestampForSample(qint64 sampleTimestampNs)
+{
+    const qint64 timestampSecond = qMax<qint64>(0, sampleTimestampNs / 1'000'000'000);
+    if (timestampSecond == m_csvLastTimestampSecond && !m_csvLastTimestampText.isEmpty()) {
+        return m_csvLastTimestampText;
+    }
+
+    m_csvLastTimestampSecond = timestampSecond;
+    m_csvLastTimestampText = QDateTime::fromSecsSinceEpoch(timestampSecond)
+                                  .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    return m_csvLastTimestampText;
 }
 
 bool ADS1256Controller::appendSampleToCsv(const SampleEntry &sample, qint64 sampleTimestampNs)
@@ -1995,31 +2076,15 @@ bool ADS1256Controller::appendSampleToCsv(const SampleEntry &sample, qint64 samp
         return false;
     }
 
-    const qint64 timestampMs = qMax<qint64>(0, sampleTimestampNs / 1'000'000);
-    const QString timestamp = QDateTime::fromMSecsSinceEpoch(timestampMs)
-                                  .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    const QString timestamp = csvTimestampForSample(sampleTimestampNs);
     const QString line = QStringLiteral("%1,%2\n")
                              .arg(timestamp)
                              .arg(static_cast<double>(sample.voltage), 0, 'f', 9);
 
-    if (m_csvFile.write(line.toUtf8()) < 0) {
-        if (m_csvWriteHealthy) {
-            appendLog(QStringLiteral("error"), QStringLiteral("写入 CSV 失败: %1").arg(m_csvPath), false);
-            CrashLogger::log(QStringLiteral("CSV write failed: %1").arg(m_csvPath));
-        }
-        m_csvWriteHealthy = false;
-        return false;
-    }
-
+    m_csvBuffer.append(line.toUtf8());
     ++m_csvFlushCounter;
-    if (m_csvFlushCounter >= kCsvFlushInterval) {
-        if (!m_csvFile.flush() && m_csvWriteHealthy) {
-            appendLog(QStringLiteral("error"), QStringLiteral("刷新 CSV 失败: %1").arg(m_csvPath), false);
-            CrashLogger::log(QStringLiteral("CSV flush failed: %1").arg(m_csvPath));
-            m_csvWriteHealthy = false;
-            return false;
-        }
-        m_csvFlushCounter = 0;
+    if (m_csvFlushCounter >= kCsvFlushInterval || m_csvBuffer.size() >= kCsvBufferFlushBytes) {
+        return flushCsvBuffer(false);
     }
     return true;
 }
@@ -2030,9 +2095,7 @@ bool ADS1256Controller::appendScanFrameToCsv(const QVector<double> &voltages, qi
         return false;
     }
 
-    const qint64 timestampMs = qMax<qint64>(0, sampleTimestampNs / 1'000'000);
-    const QString timestamp = QDateTime::fromMSecsSinceEpoch(timestampMs)
-                                  .toString(QStringLiteral("yyyy-MM-dd HH:mm:ss"));
+    const QString timestamp = csvTimestampForSample(sampleTimestampNs);
 
     const QString line = QStringLiteral("%1,%2,%3,%4,%5,%6,%7,%8,%9\n")
                              .arg(timestamp)
@@ -2045,24 +2108,10 @@ bool ADS1256Controller::appendScanFrameToCsv(const QVector<double> &voltages, qi
                              .arg(voltages.at(6), 0, 'f', 9)
                              .arg(voltages.at(7), 0, 'f', 9);
 
-    if (m_csvFile.write(line.toUtf8()) < 0) {
-        if (m_csvWriteHealthy) {
-            appendLog(QStringLiteral("error"), QStringLiteral("写入 CSV 失败: %1").arg(m_csvPath), false);
-            CrashLogger::log(QStringLiteral("CSV write failed: %1").arg(m_csvPath));
-        }
-        m_csvWriteHealthy = false;
-        return false;
-    }
-
+    m_csvBuffer.append(line.toUtf8());
     ++m_csvFlushCounter;
-    if (m_csvFlushCounter >= kCsvFlushInterval) {
-        if (!m_csvFile.flush() && m_csvWriteHealthy) {
-            appendLog(QStringLiteral("error"), QStringLiteral("刷新 CSV 失败: %1").arg(m_csvPath), false);
-            CrashLogger::log(QStringLiteral("CSV flush failed: %1").arg(m_csvPath));
-            m_csvWriteHealthy = false;
-            return false;
-        }
-        m_csvFlushCounter = 0;
+    if (m_csvFlushCounter >= kCsvFlushInterval || m_csvBuffer.size() >= kCsvBufferFlushBytes) {
+        return flushCsvBuffer(false);
     }
     return true;
 }
@@ -3415,10 +3464,37 @@ void ADS1256Controller::onReadyRead()
         m_rxOverflowWarned = false;
     }
 
+    scheduleSerialDrain();
+}
+
+void ADS1256Controller::scheduleSerialDrain()
+{
+    if (m_rxDrainScheduled) {
+        return;
+    }
+
+    m_rxDrainScheduled = true;
+    QTimer::singleShot(0, this, &ADS1256Controller::drainSerialBuffer);
+}
+
+void ADS1256Controller::drainSerialBuffer()
+{
+    m_rxDrainScheduled = false;
+
+    QElapsedTimer budgetTimer;
+    budgetTimer.start();
+
+    int processedLines = 0;
     int newlineIndex = m_rxBuffer.indexOf('\n');
     while (newlineIndex >= 0) {
+        if (processedLines >= kSerialDrainMaxLines || budgetTimer.elapsed() >= kSerialDrainBudgetMs) {
+            scheduleSerialDrain();
+            return;
+        }
+
         QByteArray lineData = m_rxBuffer.left(newlineIndex);
         m_rxBuffer.remove(0, newlineIndex + 1);
+        ++processedLines;
 
         if (lineData.size() > kMaxSerialLineBytes) {
             if (!m_rxLineTooLongWarned) {

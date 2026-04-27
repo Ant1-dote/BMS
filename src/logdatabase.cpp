@@ -6,6 +6,7 @@
 #include <QSqlError>
 #include <QSqlQuery>
 #include <QUuid>
+#include <QVariantList>
 
 namespace {
 
@@ -79,6 +80,8 @@ bool LogDatabase::initialize(const QString &dbPath, QString *errorMessage)
     query.exec(QStringLiteral("PRAGMA journal_mode=WAL"));
     query.exec(QStringLiteral("PRAGMA synchronous=NORMAL"));
     query.exec(QStringLiteral("PRAGMA temp_store=MEMORY"));
+    query.exec(QStringLiteral("PRAGMA cache_size=-65536"));
+    query.exec(QStringLiteral("PRAGMA busy_timeout=5000"));
     query.exec(QStringLiteral("PRAGMA wal_autocheckpoint=1000"));
 
     if (!query.exec(QStringLiteral(
@@ -321,7 +324,19 @@ bool LogDatabase::insertSamples(const QVector<SampleEntry> &samples)
     query.prepare(QStringLiteral(
         "INSERT INTO samples(elapsed_ns, mode, channel, voltage, adc, hex) VALUES(?, ?, ?, ?, ?, ?)"));
 
-    bool ok = true;
+    QVariantList elapsedNsValues;
+    QVariantList modeValues;
+    QVariantList channelValues;
+    QVariantList voltageValues;
+    QVariantList adcValues;
+    QVariantList hexValues;
+    elapsedNsValues.reserve(samples.size());
+    modeValues.reserve(samples.size());
+    channelValues.reserve(samples.size());
+    voltageValues.reserve(samples.size());
+    adcValues.reserve(samples.size());
+    hexValues.reserve(samples.size());
+
     for (const SampleEntry &sample : samples) {
         const QString modeText = (sample.mode == SampleMode::Scan8)
             ? QStringLiteral("SCAN8")
@@ -330,19 +345,22 @@ bool LogDatabase::insertSamples(const QVector<SampleEntry> &samples)
                                      .arg(sample.adc & 0x00FFFFFF, 6, 16, QLatin1Char('0'))
                                      .toUpper();
 
-        query.addBindValue(sample.elapsedNs);
-        query.addBindValue(modeText);
-        query.addBindValue(static_cast<int>(sample.channel));
-        query.addBindValue(static_cast<double>(sample.voltage));
-        query.addBindValue(sample.adc);
-        query.addBindValue(hexValue);
-        if (!query.exec()) {
-            ok = false;
-            break;
-        }
+        elapsedNsValues.push_back(sample.elapsedNs);
+        modeValues.push_back(modeText);
+        channelValues.push_back(static_cast<int>(sample.channel));
+        voltageValues.push_back(static_cast<double>(sample.voltage));
+        adcValues.push_back(sample.adc);
+        hexValues.push_back(hexValue);
     }
 
-    if (!ok) {
+    query.addBindValue(elapsedNsValues);
+    query.addBindValue(modeValues);
+    query.addBindValue(channelValues);
+    query.addBindValue(voltageValues);
+    query.addBindValue(adcValues);
+    query.addBindValue(hexValues);
+
+    if (!query.execBatch()) {
         m_db.rollback();
         return false;
     }

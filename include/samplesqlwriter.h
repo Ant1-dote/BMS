@@ -14,6 +14,8 @@ class SampleSqlWriter : public QObject {
 public:
     explicit SampleSqlWriter(QObject *parent = nullptr);
 
+    static int maxQueueSize();
+
     Q_INVOKABLE bool configureDatabaseSync(const QString &dbPath);
     Q_INVOKABLE void enqueueSamples(const QVector<SampleEntry> &samples);
     Q_INVOKABLE bool flushPendingSync();
@@ -22,6 +24,7 @@ public:
 
 signals:
     void writerWarning(const QString &message);
+    void queueDepthChanged(int pendingCount);
 
 private:
     bool ensureDatabaseReady();

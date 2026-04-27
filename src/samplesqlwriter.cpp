@@ -4,7 +4,7 @@
 
 namespace {
 
-constexpr int kWriterBatchSize = 512;
+constexpr int kWriterBatchSize = 2048;
 constexpr int kWriterMaxQueue = 250000;
 
 } // namespace
@@ -12,6 +12,11 @@ constexpr int kWriterMaxQueue = 250000;
 SampleSqlWriter::SampleSqlWriter(QObject *parent)
     : QObject(parent)
 {
+}
+
+int SampleSqlWriter::maxQueueSize()
+{
+    return kWriterMaxQueue;
 }
 
 bool SampleSqlWriter::configureDatabaseSync(const QString &dbPath)
@@ -35,6 +40,7 @@ bool SampleSqlWriter::configureDatabaseSync(const QString &dbPath)
     }
 
     m_ready = true;
+    emit queueDepthChanged(static_cast<int>(m_queue.size()));
     return true;
 }
 
@@ -44,9 +50,7 @@ void SampleSqlWriter::enqueueSamples(const QVector<SampleEntry> &samples)
         return;
     }
 
-    for (const SampleEntry &sample : samples) {
-        m_queue.push_back(sample);
-    }
+    m_queue.insert(m_queue.end(), samples.cbegin(), samples.cend());
 
     if (static_cast<int>(m_queue.size()) > kWriterMaxQueue) {
         const int dropCount = static_cast<int>(m_queue.size()) - kWriterMaxQueue;
@@ -57,11 +61,13 @@ void SampleSqlWriter::enqueueSamples(const QVector<SampleEntry> &samples)
     }
 
     processBatches(false);
+    emit queueDepthChanged(static_cast<int>(m_queue.size()));
 }
 
 bool SampleSqlWriter::flushPendingSync()
 {
     processBatches(true);
+    emit queueDepthChanged(static_cast<int>(m_queue.size()));
     return m_queue.empty();
 }
 
@@ -70,6 +76,7 @@ int SampleSqlWriter::discardPendingSync()
     const int dropped = static_cast<int>(m_queue.size());
     m_queue.clear();
     m_failureStreak = 0;
+    emit queueDepthChanged(0);
     return dropped;
 }
 
@@ -110,6 +117,7 @@ bool SampleSqlWriter::insertFrontBatch(int batchSize)
 
     QVector<SampleEntry> batch;
     batch.reserve(batchSize);
+    batchSize = qMin(batchSize, static_cast<int>(m_queue.size()));
     for (int i = 0; i < batchSize; ++i) {
         batch.push_back(m_queue.at(i));
     }
@@ -122,9 +130,7 @@ bool SampleSqlWriter::insertFrontBatch(int batchSize)
         return false;
     }
 
-    for (int i = 0; i < batchSize; ++i) {
-        m_queue.pop_front();
-    }
+    m_queue.erase(m_queue.begin(), m_queue.begin() + batchSize);
 
     m_failureStreak = 0;
     return true;

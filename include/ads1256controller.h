@@ -12,6 +12,7 @@
 #include <QRegularExpression>
 #include <QSet>
 #include <QStringList>
+#include <QVariantMap>
 #include <QVector>
 
 #include <array>
@@ -158,6 +159,7 @@ public:
     Q_INVOKABLE void clearLogView();
     Q_INVOKABLE void clearLogStorage();
     Q_INVOKABLE void resetEkf();
+    Q_INVOKABLE QVariantMap bufferMetrics() const;
 
     Q_INVOKABLE void attachSeries(
         QObject *singleShadow,
@@ -212,6 +214,8 @@ private:
     bool configureStorageDirectory(const QString &directoryPath);
     bool openCsvForSession();
     void closeCsvFile();
+    bool flushCsvBuffer(bool forceDiskFlush);
+    QString csvTimestampForSample(qint64 sampleTimestampNs);
     bool appendSampleToCsv(const SampleEntry &sample, qint64 sampleTimestampNs);
     bool appendScanFrameToCsv(const QVector<double> &voltages, qint64 sampleTimestampNs);
     void enforcePendingSampleLimit();
@@ -255,6 +259,8 @@ private:
     std::pair<double, double> xRange(const std::deque<double> &x) const;
 
     void onReadyRead();
+    void scheduleSerialDrain();
+    void drainSerialBuffer();
     void onSerialError(QSerialPort::SerialPortError error);
 
 private:
@@ -274,6 +280,7 @@ private:
 
     QSerialPort *m_serial = nullptr;
     QByteArray m_rxBuffer;
+    bool m_rxDrainScheduled = false;
     bool m_rxOverflowWarned = false;
     bool m_rxLineTooLongWarned = false;
 
@@ -374,10 +381,14 @@ private:
     QString m_logDbPath;
     QString m_csvPath;
     QFile m_csvFile;
+    QByteArray m_csvBuffer;
+    qint64 m_csvLastTimestampSecond = -1;
+    QString m_csvLastTimestampText;
     int m_csvFlushCounter = 0;
     bool m_csvWriteHealthy = true;
     bool m_sqlOverflowWarned = false;
     int m_sqlFlushFailureStreak = 0;
+    int m_asyncPendingSamples = 0;
 
     LogListModel m_logModel;
     LogDatabase m_logDatabase;

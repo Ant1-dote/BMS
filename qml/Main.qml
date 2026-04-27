@@ -65,10 +65,14 @@ ApplicationWindow {
     property int logPanelExpandedHeight: 260
     property int logPanelCollapsedHeight: 48
     property int logPanelAnimMs: 180
+    property int activeControlGroup: 0
+    property int bufferHistoryMaxSamples: 180
+    property var bufferMetricHistory: []
+    property var latestBufferMetrics: ({})
 
     // 布局可调参数：手动改这里即可整体调整按钮和面板布局。
-    property int layoutLeftPanelPreferredWidth: 480
-    property int layoutLeftPanelMinimumWidth: 380
+    property int layoutLeftPanelPreferredWidth: 390
+    property int layoutLeftPanelMinimumWidth: 330
     property int layoutSerialColumns: 3
     property int layoutRuntimeColumns: 4
     property int layoutEkfColumns: 4
@@ -101,6 +105,14 @@ ApplicationWindow {
     property var pgaValues: [1, 2, 4, 8, 16, 32, 64]
     property var channelColors: ["#ff9e58", "#00c2a8", "#4ea1ff", "#f06b8f", "#f8bb39", "#9f7aea", "#5ec2ff", "#ff6b6b"]
     property var cycleColors: ["#ff5c5c", "#ff9f43", "#f6c445", "#26c281", "#2d98da", "#6c5ce7", "#e667af", "#00b894", "#ff7675", "#fdcb6e", "#55efc4", "#74b9ff"]
+    property var controlGroups: [
+        { title: "连接采样", subtitle: "端口 / 启停" },
+        { title: "运行参数", subtitle: "ADS / 循环" },
+        { title: "滤波算法", subtitle: "EKF 参数" },
+        { title: "高级命令", subtitle: "命令 / 继电器" },
+        { title: "通道管理", subtitle: "采样 / 显示" },
+        { title: "缓冲监控", subtitle: "队列 / 趋势" }
+    ]
     property var cycleSeriesRefs: []
     property var scanSampleFlags: [true, true, true, true, true, true, true, true]
     property var scanVisibleFlags: [true, true, true, true, true, true, true, true]
@@ -153,6 +165,43 @@ ApplicationWindow {
             return "#c93838"
         }
         return "#304861"
+    }
+
+    function bufferPercent(value, limit) {
+        const safeLimit = Math.max(1, Number(limit || 0))
+        return Math.max(0, Math.min(100, (Number(value || 0) * 100.0) / safeLimit))
+    }
+
+    function formatBytes(value) {
+        const bytes = Math.max(0, Number(value || 0))
+        if (bytes >= 1024 * 1024) {
+            return (bytes / (1024 * 1024)).toFixed(1) + " MB"
+        }
+        if (bytes >= 1024) {
+            return (bytes / 1024).toFixed(1) + " KB"
+        }
+        return Math.round(bytes).toString() + " B"
+    }
+
+    function refreshBufferMetrics() {
+        const metrics = controller.bufferMetrics()
+        latestBufferMetrics = metrics
+        const sample = {
+            rx: bufferPercent(metrics.rxBytes, metrics.rxLimitBytes),
+            csv: bufferPercent(metrics.csvBytes, metrics.csvLimitBytes),
+            pending: bufferPercent(metrics.pendingSamples, metrics.pendingLimitSamples),
+            async: bufferPercent(metrics.asyncSamples, metrics.asyncLimitSamples)
+        }
+        const nextHistory = bufferMetricHistory.concat([sample])
+        bufferMetricHistory = nextHistory.length > bufferHistoryMaxSamples
+            ? nextHistory.slice(nextHistory.length - bufferHistoryMaxSamples)
+            : nextHistory
+        if (bufferCanvas) {
+            bufferCanvas.requestPaint()
+        }
+        if (bufferTrendCanvas) {
+            bufferTrendCanvas.requestPaint()
+        }
     }
 
     component MetricCard: Rectangle {
@@ -350,6 +399,68 @@ ApplicationWindow {
                 color: parent.parent.valueColor
                 font.pixelSize: 13
                 font.bold: true
+            }
+        }
+    }
+
+    component ControlNavButton: Button {
+        id: navButton
+        required property int groupIndex
+        required property string title
+        required property string subtitle
+        property bool selected: root.activeControlGroup === groupIndex
+
+        implicitHeight: 46
+        checkable: true
+        checked: selected
+        font.pixelSize: 12
+        onClicked: root.activeControlGroup = groupIndex
+
+        contentItem: Item {
+            implicitHeight: 46
+
+            ColumnLayout {
+                anchors.fill: parent
+                anchors.leftMargin: 14
+                anchors.rightMargin: 8
+                anchors.topMargin: 6
+                anchors.bottomMargin: 6
+                spacing: 1
+
+                Label {
+                    Layout.fillWidth: true
+                    text: navButton.title
+                    color: navButton.selected ? "#17345f" : root.cText
+                    font.pixelSize: 13
+                    font.bold: navButton.selected
+                    elide: Label.ElideRight
+                }
+
+                Label {
+                    Layout.fillWidth: true
+                    text: navButton.subtitle
+                    color: navButton.selected ? "#3f6598" : root.cSubtle
+                    font.pixelSize: 11
+                    elide: Label.ElideRight
+                }
+            }
+        }
+
+        background: Rectangle {
+            radius: 6
+            color: navButton.down
+                   ? "#d6e1f2"
+                   : (navButton.selected ? "#e5edf9" : (navButton.hovered ? "#f0f4fb" : "#ffffff"))
+            border.color: navButton.selected ? "#aebfde" : "#d6dfed"
+            border.width: 1
+
+            Rectangle {
+                anchors.left: parent.left
+                anchors.top: parent.top
+                anchors.bottom: parent.bottom
+                width: 4
+                radius: 2
+                color: navButton.selected ? root.cAccent : "transparent"
             }
         }
     }
@@ -585,6 +696,14 @@ ApplicationWindow {
         onTriggered: root.refreshCaptureElapsed()
     }
 
+    Timer {
+        id: bufferMetricsTimer
+        interval: 1000
+        repeat: true
+        running: true
+        onTriggered: root.refreshBufferMetrics()
+    }
+
     Connections {
         target: controller
 
@@ -603,6 +722,7 @@ ApplicationWindow {
     }
 
     Component.onCompleted: {
+        refreshBufferMetrics()
         if (controller.acquisitionEnabled) {
             captureStartEpochMs = Date.now()
             captureElapsedSeconds = 0
@@ -615,9 +735,9 @@ ApplicationWindow {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: 16
-        height: 70
-        radius: 14
+        anchors.margins: 12
+        height: 54
+        radius: 10
         gradient: Gradient {
             GradientStop { position: 0.0; color: "#ffffff" }
             GradientStop { position: 1.0; color: "#f5f8fe" }
@@ -631,9 +751,9 @@ ApplicationWindow {
             spacing: 10
 
             Label {
-                text: "控制台"
+                text: "BMS 数据监控"
                 color: root.cTitle
-                font.pixelSize: 22
+                font.pixelSize: 18
                 font.bold: true
             }
 
@@ -697,7 +817,10 @@ ApplicationWindow {
         anchors.right: parent.right
         anchors.bottom: parent.bottom
         anchors.top: topBar.bottom
-        anchors.margins: 16
+        anchors.leftMargin: 12
+        anchors.rightMargin: 12
+        anchors.topMargin: 10
+        anchors.bottomMargin: 12
         orientation: Qt.Horizontal
 
         ScrollView {
@@ -719,7 +842,7 @@ ApplicationWindow {
                     Layout.fillWidth: true
                     Layout.leftMargin: root.cSectionOuterPad
                     Layout.rightMargin: root.cSectionOuterPad
-                    implicitHeight: 96
+                    implicitHeight: controlPanelHeader.implicitHeight + 20
                     radius: root.cSectionRadius
                     gradient: Gradient {
                         GradientStop { position: 0.0; color: "#ffffff" }
@@ -729,6 +852,7 @@ ApplicationWindow {
                     border.width: 1
 
                     ColumnLayout {
+                        id: controlPanelHeader
                         anchors.fill: parent
                         anchors.margins: 10
                         spacing: 8
@@ -788,12 +912,61 @@ ApplicationWindow {
                                 valueColor: "#3a5d80"
                             }
                         }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 1
+                            color: "#dfe6f2"
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 8
+
+                            Label {
+                                text: "功能首栏"
+                                color: root.cTitle
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Label {
+                                text: root.controlGroups[root.activeControlGroup].subtitle
+                                color: root.cSubtle
+                                font.pixelSize: 11
+                                elide: Label.ElideRight
+                            }
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: width > 430 ? 2 : 1
+                            rowSpacing: 8
+                            columnSpacing: 8
+
+                            Repeater {
+                                model: root.controlGroups
+
+                                delegate: ControlNavButton {
+                                    required property int index
+                                    required property var modelData
+
+                                    Layout.fillWidth: true
+                                    groupIndex: index
+                                    title: modelData.title
+                                    subtitle: modelData.subtitle
+                                }
+                            }
+                        }
                     }
                 }
 
                 SectionCard {
                     id: serialSection
-                    title: "01 串口连接"
+                    visible: root.activeControlGroup === 0
+                    title: "01 连接与采样"
 
                     GridLayout {
                         x: root.cSectionContentPad
@@ -924,11 +1097,15 @@ ApplicationWindow {
                     }
                 }
 
-                Item { Layout.preferredHeight: 4 }
+                Item {
+                    visible: root.activeControlGroup === 0
+                    Layout.preferredHeight: 4
+                }
 
                 SectionCard {
                     id: runtimeSection
-                    title: "02 运行配置"
+                    visible: root.activeControlGroup === 1
+                    title: "02 运行参数与循环"
 
                     GridLayout {
                         x: root.cSectionContentPad
@@ -1197,6 +1374,7 @@ ApplicationWindow {
 
                 SectionCard {
                     id: ekfSection
+                    visible: root.activeControlGroup === 2
                     title: "03 滤波 (EKF)"
 
                     GridLayout {
@@ -1275,6 +1453,7 @@ ApplicationWindow {
 
                 SectionCard {
                     id: commandSection
+                    visible: root.activeControlGroup === 3
                     title: "04 高级命令"
 
                     ColumnLayout {
@@ -1429,6 +1608,7 @@ ApplicationWindow {
 
                 SectionCard {
                     id: scanSection
+                    visible: root.activeControlGroup === 4
                     title: "05 多通道采样与显示"
 
                     GridLayout {
@@ -1514,6 +1694,181 @@ ApplicationWindow {
                     }
                 }
 
+                SectionCard {
+                    id: bufferMonitorSection
+                    visible: root.activeControlGroup === 5
+                    title: "06 缓冲监控"
+
+                    ColumnLayout {
+                        x: root.cSectionContentPad
+                        y: root.cSectionContentPad
+                        width: parent.width - root.cSectionContentPad * 2
+                        visible: height > 0.5 || opacity > 0.01
+                        enabled: !bufferMonitorSection.collapsed
+                        opacity: bufferMonitorSection.collapsed ? 0.0 : 1.0
+                        height: bufferMonitorSection.collapsed ? 0 : implicitHeight
+                        clip: true
+                        spacing: 10
+
+                        Behavior on height {
+                            NumberAnimation {
+                                duration: root.cCollapseAnimMs
+                                easing.type: Easing.InOutCubic
+                            }
+                        }
+
+                        Behavior on opacity {
+                            NumberAnimation {
+                                duration: Math.round(root.cCollapseAnimMs * 0.7)
+                                easing.type: Easing.InOutQuad
+                            }
+                        }
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            columns: 2
+                            rowSpacing: 8
+                            columnSpacing: 8
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "串口"
+                                value: Math.round(root.bufferPercent(root.latestBufferMetrics.rxBytes, root.latestBufferMetrics.rxLimitBytes)) + "%"
+                                valueColor: "#3b82f6"
+                            }
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "CSV"
+                                value: root.formatBytes(root.latestBufferMetrics.csvBytes)
+                                valueColor: "#0f9f7a"
+                            }
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "本地 SQL"
+                                value: Number(root.latestBufferMetrics.pendingSamples || 0).toString()
+                                valueColor: "#b17600"
+                            }
+
+                            StatusChip {
+                                Layout.fillWidth: true
+                                label: "异步 SQL"
+                                value: Number(root.latestBufferMetrics.asyncSamples || 0).toString()
+                                valueColor: "#c93838"
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.fillWidth: true
+                            Layout.preferredHeight: 230
+                            Layout.bottomMargin: root.cSectionContentPad
+                            radius: 8
+                            color: "#fbfcff"
+                            border.color: root.cIndustrialBorderStrong
+                            border.width: 1
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 6
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+
+                                    Label {
+                                        text: "占用率趋势"
+                                        color: root.cTitle
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: "最近 " + root.bufferMetricHistory.length + " 秒"
+                                        color: root.cSubtle
+                                        font.pixelSize: 11
+                                    }
+                                }
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 10
+
+                                    Label { text: "串口"; color: "#3b82f6"; font.pixelSize: 11 }
+                                    Label { text: "CSV"; color: "#10b981"; font.pixelSize: 11 }
+                                    Label { text: "本地SQL"; color: "#f59e0b"; font.pixelSize: 11 }
+                                    Label { text: "异步SQL"; color: "#ef4444"; font.pixelSize: 11 }
+                                }
+
+                                Canvas {
+                                    id: bufferTrendCanvas
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+
+                                    onPaint: {
+                                        const ctx = getContext("2d")
+                                        ctx.clearRect(0, 0, width, height)
+
+                                        const left = 30
+                                        const top = 6
+                                        const right = 8
+                                        const bottom = 16
+                                        const plotW = Math.max(1, width - left - right)
+                                        const plotH = Math.max(1, height - top - bottom)
+                                        const history = root.bufferMetricHistory
+
+                                        ctx.fillStyle = "#ffffff"
+                                        ctx.fillRect(left, top, plotW, plotH)
+                                        ctx.strokeStyle = "#e1e7f0"
+                                        ctx.lineWidth = 1
+                                        ctx.font = "10px Segoe UI"
+                                        ctx.fillStyle = root.cSubtle
+                                        for (let tick = 0; tick <= 2; ++tick) {
+                                            const value = tick * 50
+                                            const y = top + ((100 - value) / 100) * plotH
+                                            ctx.beginPath()
+                                            ctx.moveTo(left, y)
+                                            ctx.lineTo(left + plotW, y)
+                                            ctx.stroke()
+                                            ctx.fillText(value + "%", 2, y + 3)
+                                        }
+
+                                        if (history.length < 2) {
+                                            ctx.fillText("等待采样...", left + 10, top + plotH / 2)
+                                            return
+                                        }
+
+                                        function drawLine(key, color) {
+                                            ctx.beginPath()
+                                            ctx.strokeStyle = color
+                                            ctx.lineWidth = 1.7
+                                            for (let i = 0; i < history.length; ++i) {
+                                                const x = left + (i / Math.max(1, history.length - 1)) * plotW
+                                                const y = top + ((100 - Number(history[i][key] || 0)) / 100) * plotH
+                                                if (i === 0) {
+                                                    ctx.moveTo(x, y)
+                                                } else {
+                                                    ctx.lineTo(x, y)
+                                                }
+                                            }
+                                            ctx.stroke()
+                                        }
+
+                                        drawLine("rx", "#3b82f6")
+                                        drawLine("csv", "#10b981")
+                                        drawLine("pending", "#f59e0b")
+                                        drawLine("async", "#ef4444")
+                                        ctx.strokeStyle = "#cfd8e6"
+                                        ctx.strokeRect(left, top, plotW, plotH)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 Item { Layout.fillHeight: true }
             }
         }
@@ -1532,13 +1887,14 @@ ApplicationWindow {
 
                 Rectangle {
                     id: metricsPanel
+                    visible: false
                     property real expandedHeight: metricsHeader.implicitHeight + metricsGrid.implicitHeight + 18
                     property real panelHeight: root.metricsPanelCollapsed
                                                ? root.metricsPanelCollapsedHeight
                                                : Math.max(root.metricsPanelCollapsedHeight, expandedHeight)
 
                     Layout.fillWidth: true
-                    Layout.preferredHeight: panelHeight
+                    Layout.preferredHeight: 0
                     color: root.cCard
                     radius: 10
                     border.color: root.cPanelBorder
@@ -1623,9 +1979,158 @@ ApplicationWindow {
                 }
 
                 Rectangle {
+                    id: bufferPanel
+                    visible: false
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 0
+                    color: root.cCard
+                    radius: 10
+                    border.color: root.cPanelBorder
+                    border.width: 1
+                    clip: true
+
+                    ColumnLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 6
+
+                        RowLayout {
+                            Layout.fillWidth: true
+
+                            Label {
+                                text: "缓冲区占用率"
+                                color: root.cTitle
+                                font.pixelSize: 13
+                                font.bold: true
+                            }
+
+                            Item { Layout.fillWidth: true }
+
+                            Label {
+                                text: "最近 " + root.bufferMetricHistory.length + " 秒"
+                                color: root.cSubtle
+                                font.pixelSize: 11
+                            }
+                        }
+
+                        RowLayout {
+                            Layout.fillWidth: true
+                            spacing: 12
+
+                            RowLayout {
+                                spacing: 5
+                                Rectangle { Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 2; color: "#3b82f6" }
+                                Label {
+                                    text: "串口 " + Math.round(root.bufferPercent(root.latestBufferMetrics.rxBytes, root.latestBufferMetrics.rxLimitBytes)) + "%"
+                                    color: root.cText
+                                    font.pixelSize: 11
+                                }
+                            }
+
+                            RowLayout {
+                                spacing: 5
+                                Rectangle { Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 2; color: "#10b981" }
+                                Label {
+                                    text: "CSV " + root.formatBytes(root.latestBufferMetrics.csvBytes)
+                                    color: root.cText
+                                    font.pixelSize: 11
+                                }
+                            }
+
+                            RowLayout {
+                                spacing: 5
+                                Rectangle { Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 2; color: "#f59e0b" }
+                                Label {
+                                    text: "本地SQL " + Number(root.latestBufferMetrics.pendingSamples || 0)
+                                    color: root.cText
+                                    font.pixelSize: 11
+                                }
+                            }
+
+                            RowLayout {
+                                spacing: 5
+                                Rectangle { Layout.preferredWidth: 9; Layout.preferredHeight: 9; radius: 2; color: "#ef4444" }
+                                Label {
+                                    text: "异步SQL " + Number(root.latestBufferMetrics.asyncSamples || 0)
+                                    color: root.cText
+                                    font.pixelSize: 11
+                                }
+                            }
+                        }
+
+                        Canvas {
+                            id: bufferCanvas
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+
+                            onPaint: {
+                                const ctx = getContext("2d")
+                                ctx.clearRect(0, 0, width, height)
+
+                                const left = 34
+                                const top = 8
+                                const right = 8
+                                const bottom = 18
+                                const plotW = Math.max(1, width - left - right)
+                                const plotH = Math.max(1, height - top - bottom)
+                                const history = root.bufferMetricHistory
+
+                                ctx.fillStyle = "#fbfcff"
+                                ctx.fillRect(left, top, plotW, plotH)
+
+                                ctx.strokeStyle = "#e1e7f0"
+                                ctx.lineWidth = 1
+                                ctx.font = "10px Segoe UI"
+                                ctx.fillStyle = root.cSubtle
+                                for (let tick = 0; tick <= 2; ++tick) {
+                                    const value = tick * 50
+                                    const y = top + ((100 - value) / 100) * plotH
+                                    ctx.beginPath()
+                                    ctx.moveTo(left, y)
+                                    ctx.lineTo(left + plotW, y)
+                                    ctx.stroke()
+                                    ctx.fillText(value + "%", 4, y + 3)
+                                }
+
+                                if (history.length < 2) {
+                                    ctx.fillStyle = root.cSubtle
+                                    ctx.fillText("等待缓冲区采样...", left + 10, top + plotH / 2)
+                                    return
+                                }
+
+                                function drawLine(key, color) {
+                                    ctx.beginPath()
+                                    ctx.strokeStyle = color
+                                    ctx.lineWidth = 1.8
+                                    for (let i = 0; i < history.length; ++i) {
+                                        const x = left + (i / Math.max(1, history.length - 1)) * plotW
+                                        const y = top + ((100 - Number(history[i][key] || 0)) / 100) * plotH
+                                        if (i === 0) {
+                                            ctx.moveTo(x, y)
+                                        } else {
+                                            ctx.lineTo(x, y)
+                                        }
+                                    }
+                                    ctx.stroke()
+                                }
+
+                                drawLine("rx", "#3b82f6")
+                                drawLine("csv", "#10b981")
+                                drawLine("pending", "#f59e0b")
+                                drawLine("async", "#ef4444")
+
+                                ctx.strokeStyle = "#cfd8e6"
+                                ctx.lineWidth = 1
+                                ctx.strokeRect(left, top, plotW, plotH)
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
                     Layout.fillWidth: true
                     Layout.fillHeight: true
-                    Layout.preferredHeight: 420
+                    Layout.minimumHeight: 480
                     color: root.cChartBg
                     radius: 10
                     border.color: root.cPanelBorder
@@ -1865,6 +2370,169 @@ ApplicationWindow {
                                 border.color: "#3a76d4"
                                 border.width: 1
                                 radius: 2
+                            }
+                        }
+                    }
+                }
+
+                Rectangle {
+                    id: bottomMonitorDock
+                    Layout.fillWidth: true
+                    Layout.preferredHeight: 96
+                    color: root.cCard
+                    radius: 10
+                    border.color: root.cPanelBorder
+                    border.width: 1
+                    clip: true
+
+                    RowLayout {
+                        anchors.fill: parent
+                        anchors.margins: 8
+                        spacing: 0
+
+                        GridLayout {
+                            Layout.fillWidth: true
+                            Layout.fillHeight: true
+                            columns: 4
+                            rowSpacing: 8
+                            columnSpacing: 8
+
+                            MetricCard {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 76
+                                title: "电压"
+                                value: controller.latestVoltageText
+                                accent: "#00a884"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 76
+                                title: "采样数"
+                                value: controller.sampleCount.toString()
+                                accent: "#2f6df5"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 76
+                                title: "ADC"
+                                value: controller.latestAdText
+                                accent: "#f59e0b"
+                            }
+                            MetricCard {
+                                Layout.fillWidth: true
+                                Layout.preferredHeight: 76
+                                title: "HEX"
+                                value: controller.latestHexText
+                                accent: "#d946ef"
+                            }
+                        }
+
+                        Rectangle {
+                            visible: false
+                            Layout.preferredWidth: 0
+                            Layout.fillHeight: false
+                            radius: 8
+                            color: "#fbfcff"
+                            border.color: "#dbe3ef"
+                            border.width: 1
+
+                            ColumnLayout {
+                                anchors.fill: parent
+                                anchors.margins: 8
+                                spacing: 5
+
+                                RowLayout {
+                                    Layout.fillWidth: true
+                                    spacing: 12
+
+                                    Label {
+                                        text: "缓冲区趋势"
+                                        color: root.cTitle
+                                        font.pixelSize: 12
+                                        font.bold: true
+                                    }
+
+                                    Item { Layout.fillWidth: true }
+
+                                    Label {
+                                        text: "串口 " + Math.round(root.bufferPercent(root.latestBufferMetrics.rxBytes, root.latestBufferMetrics.rxLimitBytes)) + "%"
+                                        color: "#3b82f6"
+                                        font.pixelSize: 11
+                                    }
+                                    Label {
+                                        text: "CSV " + root.formatBytes(root.latestBufferMetrics.csvBytes)
+                                        color: "#10b981"
+                                        font.pixelSize: 11
+                                    }
+                                    Label {
+                                        text: "SQL " + Number(root.latestBufferMetrics.pendingSamples || 0) + "/" + Number(root.latestBufferMetrics.asyncSamples || 0)
+                                        color: "#ef4444"
+                                        font.pixelSize: 11
+                                    }
+                                }
+
+                                Canvas {
+                                    id: bottomBufferTrendCanvas
+                                    Layout.fillWidth: true
+                                    Layout.fillHeight: true
+
+                                    onPaint: {
+                                        const ctx = getContext("2d")
+                                        ctx.clearRect(0, 0, width, height)
+
+                                        const left = 30
+                                        const top = 4
+                                        const right = 6
+                                        const bottom = 14
+                                        const plotW = Math.max(1, width - left - right)
+                                        const plotH = Math.max(1, height - top - bottom)
+                                        const history = root.bufferMetricHistory
+
+                                        ctx.fillStyle = "#ffffff"
+                                        ctx.fillRect(left, top, plotW, plotH)
+                                        ctx.strokeStyle = "#e1e7f0"
+                                        ctx.lineWidth = 1
+                                        ctx.font = "10px Segoe UI"
+                                        ctx.fillStyle = root.cSubtle
+                                        for (let tick = 0; tick <= 2; ++tick) {
+                                            const value = tick * 50
+                                            const y = top + ((100 - value) / 100) * plotH
+                                            ctx.beginPath()
+                                            ctx.moveTo(left, y)
+                                            ctx.lineTo(left + plotW, y)
+                                            ctx.stroke()
+                                            ctx.fillText(value + "%", 2, y + 3)
+                                        }
+
+                                        if (history.length < 2) {
+                                            ctx.fillText("等待采样...", left + 10, top + plotH / 2)
+                                            return
+                                        }
+
+                                        function drawLine(key, color) {
+                                            ctx.beginPath()
+                                            ctx.strokeStyle = color
+                                            ctx.lineWidth = 1.7
+                                            for (let i = 0; i < history.length; ++i) {
+                                                const x = left + (i / Math.max(1, history.length - 1)) * plotW
+                                                const y = top + ((100 - Number(history[i][key] || 0)) / 100) * plotH
+                                                if (i === 0) {
+                                                    ctx.moveTo(x, y)
+                                                } else {
+                                                    ctx.lineTo(x, y)
+                                                }
+                                            }
+                                            ctx.stroke()
+                                        }
+
+                                        drawLine("rx", "#3b82f6")
+                                        drawLine("csv", "#10b981")
+                                        drawLine("pending", "#f59e0b")
+                                        drawLine("async", "#ef4444")
+                                        ctx.strokeStyle = "#cfd8e6"
+                                        ctx.strokeRect(left, top, plotW, plotH)
+                                    }
+                                }
                             }
                         }
                     }
